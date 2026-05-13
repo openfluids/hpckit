@@ -4,7 +4,6 @@ import argparse
 import datetime as dt
 import hashlib
 import json
-import os
 import re
 import shlex
 import subprocess
@@ -21,6 +20,7 @@ WORKFLOWS = {"process", "render", "sparse", "dense"}
 
 @dataclass
 class Config:
+    root: Path
     project: str
     remote: str
     work_root: str
@@ -42,6 +42,7 @@ def load_config(start: Path | None = None) -> Config:
         if cfg_path.exists():
             data = yaml.safe_load(cfg_path.read_text()) or {}
             return Config(
+                root=path,
                 project=data.get("project", path.name),
                 remote=data.get("remote", "jz"),
                 work_root=data["work_root"],
@@ -78,8 +79,13 @@ def run_id(workflow: str, case: str, ref: str) -> str:
     return f"{utc_now()}-{workflow}-{case_slug(case)}-{short_ref(ref)}"
 
 
+def project_path(cfg: Config, path: str | Path) -> Path:
+    candidate = Path(path)
+    return candidate if candidate.is_absolute() else cfg.root / candidate
+
+
 def local_receipt_dir(cfg: Config) -> Path:
-    return Path(cfg.artifact_sync.get("receipts", "jz_manager/receipts"))
+    return project_path(cfg, cfg.artifact_sync.get("receipts", "jz_manager/receipts"))
 
 
 def read_receipt(cfg: Config, rid: str) -> dict[str, Any]:
@@ -181,7 +187,7 @@ printf '%s\n' "$sha"
 
 
 def build_packet(cfg: Config, rid: str, workflow: str, case: str, repos: dict[str, str], extra: dict[str, Any]) -> Path:
-    root = Path(".jz-manager") / "runs" / rid
+    root = cfg.root / ".jz-manager" / "runs" / rid
     root.mkdir(parents=True, exist_ok=True)
     run_yaml = {"run_id": rid, "project": cfg.project, "workflow": workflow, "case": case, "repos": repos, **extra}
     (root / "run.yaml").write_text(yaml.safe_dump(run_yaml, sort_keys=False))
@@ -223,7 +229,8 @@ def base_receipt(cfg: Config, rid: str, workflow: str, case: str, repos: dict[st
 
 def publish_receipt(cfg: Config, receipt: dict[str, Any]) -> None:
     write_local_receipt(cfg, receipt)
-    tmp = Path(".jz-manager") / f"{receipt['run_id']}.receipt.json"
+    tmp = cfg.root / ".jz-manager" / f"{receipt['run_id']}.receipt.json"
+    tmp.parent.mkdir(parents=True, exist_ok=True)
     tmp.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     remote = f"{cfg.remote_state_root}/receipts/{receipt['run_id']}.json"
     run(["scp", str(tmp), f"{cfg.remote}:{remote}"])
@@ -255,7 +262,7 @@ def submit_sparse(cfg: Config, args: argparse.Namespace) -> int:
     case = args.case.strip("/")
     dom = hashlib.sha1(f"{case}:{args.to}:{args.chunk}".encode()).hexdigest()[:7]
     rid = run_id("sparse", case, dom)
-    force = "true" if args.force_reconcile else "false"
+    force = "True" if args.force_reconcile else "False"
     chunk_line = "" if args.chunk is None else f"new_chunk={float(args.chunk)}"
     script = f"""
 set -euo pipefail
@@ -294,7 +301,7 @@ for p in pathlib.Path('.').glob('*.par'):
 PY
 )
 python3 - <<PY
-old_target=float('$old_target'); par='$par_end'; force=$force
+old_target=float('$old_target'); par='$par_end'; force={force}
 if par:
     pe=float(par)
     if pe > old_target + 1e-9 and not force:
@@ -347,10 +354,16 @@ def cmd_sync_artifacts(args: argparse.Namespace) -> int:
     receipt = read_receipt(cfg, args.run_id)
     workflow = receipt["workflow"]
     key = "renders" if workflow == "render" else "processed"
-    dest = Path(cfg.artifact_sync.get(key, f"data/jz_{key}")) / args.run_id
+    dest = project_path(cfg, cfg.artifact_sync.get(key, f"data/jz_{key}")) / args.run_id
     dest.mkdir(parents=True, exist_ok=True)
     src = receipt["remote_output_path"].rstrip("/") + "/"
-    run(["rsync", "-az", f"{cfg.remote}:{src}", str(dest) + "/"], check=False)
+    cp = run(["rsync", "-az", f"{cfg.remote}:{src}", str(dest) + "/"], check=False)
+    if cp.returncode != 0:
+        if cp.stdout:
+            print(cp.stdout, end="")
+        if cp.stderr:
+            print(cp.stderr, file=sys.stderr, end="")
+        raise SystemExit(f"rsync failed for {args.run_id} with exit code {cp.returncode}")
     receipt["status"] = "validated"
     receipt["validated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
     write_local_receipt(cfg, receipt)
@@ -411,16 +424,44 @@ def build_parser() -> argparse.ArgumentParser:
     ini.set_defaults(func=cmd_init)
     sub.add_parser("status").set_defaults(func=cmd_status)
     u = sub.add_parser("update-repo")
-    u.add_argument("tool", choices=sorted(TOOLS)); u.add_argument("--ref", required=True); u.add_argument("--repo-url")
+    u.add_argument("tool", choices=sorted(TOOLS))
+    u.add_argument("--ref", required=True)
+    u.add_argument("--repo-url")
     u.set_defaults(func=cmd_update_repo)
+
     s = sub.add_parser("submit")
     ss = s.add_subparsers(dest="workflow", required=True)
-    pr = ss.add_parser("process"); pr.add_argument("case"); pr.add_argument("--spipe-ref", required=True); pr.add_argument("--manual", action="store_true"); pr.set_defaults(func=cmd_submit)
-    rr = ss.add_parser("render"); rr.add_argument("case"); rr.add_argument("--neksnap-ref", required=True); rr.add_argument("--manual", action="store_true"); rr.set_defaults(func=cmd_submit)
-    sp = ss.add_parser("sparse"); sp.add_argument("case"); sp.add_argument("--to", required=True, type=float); sp.add_argument("--chunk", type=float); sp.add_argument("--force-reconcile", action="store_true"); sp.set_defaults(func=cmd_submit)
-    po = sub.add_parser("poll"); po.add_argument("run_id", nargs="?"); po.set_defaults(func=cmd_poll)
-    sy = sub.add_parser("sync-artifacts"); sy.add_argument("run_id"); sy.set_defaults(func=cmd_sync_artifacts)
-    r = sub.add_parser("receipt"); r.add_argument("run_id"); r.set_defaults(func=cmd_receipt)
+
+    pr = ss.add_parser("process")
+    pr.add_argument("case")
+    pr.add_argument("--spipe-ref", required=True)
+    pr.add_argument("--manual", action="store_true")
+    pr.set_defaults(func=cmd_submit)
+
+    rr = ss.add_parser("render")
+    rr.add_argument("case")
+    rr.add_argument("--neksnap-ref", required=True)
+    rr.add_argument("--manual", action="store_true")
+    rr.set_defaults(func=cmd_submit)
+
+    sp = ss.add_parser("sparse")
+    sp.add_argument("case")
+    sp.add_argument("--to", required=True, type=float)
+    sp.add_argument("--chunk", type=float)
+    sp.add_argument("--force-reconcile", action="store_true")
+    sp.set_defaults(func=cmd_submit)
+
+    po = sub.add_parser("poll")
+    po.add_argument("run_id", nargs="?")
+    po.set_defaults(func=cmd_poll)
+
+    sy = sub.add_parser("sync-artifacts")
+    sy.add_argument("run_id")
+    sy.set_defaults(func=cmd_sync_artifacts)
+
+    r = sub.add_parser("receipt")
+    r.add_argument("run_id")
+    r.set_defaults(func=cmd_receipt)
     return p
 
 
