@@ -56,7 +56,11 @@ def load_config(start: Path | None = None) -> Config:
 
 
 def ssh(cfg: Config, script: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return run(["ssh", cfg.remote, "bash", "-lc", script], check=check)
+    # ssh joins argv[2:] with spaces; without quoting the script, only the
+    # first token reaches bash -lc and the rest leak into the outer shell.
+    # Quote once so the whole script is a single bash -lc argument.
+    remote_cmd = f"bash -lc {shlex.quote(script.lstrip())}"
+    return run(["ssh", cfg.remote, remote_cmd], check=check)
 
 
 def utc_now() -> str:
@@ -118,13 +122,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print(f"remote: {cfg.remote}")
     local = run(["ssh", "-G", cfg.remote], check=False)
     print(f"ssh_config: {'ok' if local.returncode == 0 else 'failed'}")
+    venv = f"{cfg.work_root}/.venv"
     script = f"""
 set -e
 printf 'work_root: '; test -d {shell_quote(cfg.work_root)} && echo ok || echo missing
-printf 'remote_state_root: '; mkdir -p {shell_quote(cfg.remote_state_root)}/{{runs,outputs/processed,outputs/renders,receipts,envs}} && echo ok
+printf 'remote_state_root: '; mkdir -p {shell_quote(cfg.remote_state_root)}/{{runs,outputs/processed,outputs/renders,receipts}} && echo ok
 printf 'remote_repos_root: '; mkdir -p {shell_quote(cfg.remote_repos_root)} && echo ok
 printf 'slurm: '; command -v sbatch >/dev/null && command -v squeue >/dev/null && echo ok || echo missing
-for t in spipe neksnap dsgbr dynachaos; do
+for t in spipe neksnap nekStab; do
   if test -d {shell_quote(cfg.remote_repos_root)}/$t/.git; then
     sha=$(git -C {shell_quote(cfg.remote_repos_root)}/$t rev-parse --short HEAD 2>/dev/null || true)
     echo "repo.$t: $sha"
@@ -132,6 +137,20 @@ for t in spipe neksnap dsgbr dynachaos; do
     echo "repo.$t: missing"
   fi
 done
+if test -d {shell_quote(venv)}; then
+  pyver=$({shell_quote(venv)}/bin/python --version 2>&1)
+  echo "shared_venv: ok ($pyver)"
+  for mod in spipe neksnap dsgbr dynachaos scipy numpy matplotlib pyvista pymech vtk; do
+    if {shell_quote(venv)}/bin/python -c "import $mod" 2>/dev/null; then
+      echo "  import.$mod: ok"
+    else
+      echo "  import.$mod: missing"
+    fi
+  done
+  command -v ffmpeg >/dev/null && echo "  bin.ffmpeg: ok" || echo "  bin.ffmpeg: missing"
+else
+  echo "shared_venv: missing (expected at {venv})"
+fi
 """
     cp = ssh(cfg, script, check=False)
     print(cp.stdout, end="")
@@ -186,21 +205,75 @@ printf '%s\n' "$sha"
     return 0
 
 
+def _minimal_registry_toml(work_root: str, case: str) -> str:
+    slug = case_slug(case)
+    return (
+        "[defaults]\n"
+        f'input_root = "{work_root}"\n\n'
+        f"[cases.{slug}]\n"
+        f'input_path = "{case}"\n'
+        'signal_files = ["lift_drag.all"]\n'
+    )
+
+
 def build_packet(cfg: Config, rid: str, workflow: str, case: str, repos: dict[str, str], extra: dict[str, Any]) -> Path:
     root = cfg.root / ".jz-manager" / "runs" / rid
     root.mkdir(parents=True, exist_ok=True)
     run_yaml = {"run_id": rid, "project": cfg.project, "workflow": workflow, "case": case, "repos": repos, **extra}
     (root / "run.yaml").write_text(yaml.safe_dump(run_yaml, sort_keys=False))
-    (root / "case_registry.toml").write_text(f'case = "{case}"\n')
-    job = f"""#!/bin/bash
-#SBATCH --job-name={rid[:40]}
-#SBATCH --output={cfg.remote_state_root}/runs/{rid}/slurm-%j.out
-#SBATCH --error={cfg.remote_state_root}/runs/{rid}/slurm-%j.err
-set -euo pipefail
-echo 'jzp run {rid}'
-echo 'workflow {workflow}'
-echo 'case {case}'
-"""
+
+    remote_run = f"{cfg.remote_state_root}/runs/{rid}"
+    out_kind = "renders" if workflow == "render" else "processed"
+    remote_out = f"{cfg.remote_state_root}/outputs/{out_kind}/{rid}"
+    venv = f"{cfg.work_root}/.venv"
+
+    if workflow == "process":
+        registry_src = extra.get("registry")
+        if registry_src:
+            src = Path(registry_src).expanduser()
+            if not src.is_absolute():
+                src = (cfg.root / src).resolve()
+            if not src.exists():
+                raise SystemExit(f"--registry path not found: {src}")
+            (root / "registry.toml").write_text(src.read_text())
+        else:
+            (root / "registry.toml").write_text(_minimal_registry_toml(cfg.work_root, case))
+        body = (
+            f'mkdir -p {shell_quote(remote_out)}\n'
+            f'{shell_quote(venv + "/bin/python")} -m spipe.cli process \\\n'
+            f'  --registry {shell_quote(remote_run + "/registry.toml")} \\\n'
+            f'  --output-root {shell_quote(remote_out)}\n'
+            f'echo "DONE process {case} -> {remote_out}"\n'
+        )
+        time_limit = "01:00:00"
+    elif workflow == "render":
+        pattern = extra.get("pattern", "*0.f0*")
+        body = (
+            f'mkdir -p {shell_quote(remote_out)}\n'
+            f'{shell_quote(venv + "/bin/neksnap")} render-many \\\n'
+            f'  --case-dir {shell_quote(cfg.work_root + "/" + case)} \\\n'
+            f'  --pattern {shell_quote(pattern)} \\\n'
+            f'  --out {shell_quote(remote_out)}\n'
+            f'echo "DONE render {case} -> {remote_out}"\n'
+        )
+        time_limit = "04:00:00"
+    else:
+        body = f"echo 'jzp run {rid}'\necho 'workflow {workflow}'\necho 'case {case}'\n"
+        time_limit = "00:30:00"
+
+    job = (
+        "#!/bin/bash\n"
+        f"#SBATCH --job-name={rid[:40]}\n"
+        f"#SBATCH --output={remote_run}/slurm-%j.out\n"
+        f"#SBATCH --error={remote_run}/slurm-%j.err\n"
+        "#SBATCH --account=vpo@cpu\n"
+        "#SBATCH --partition=prepost\n"
+        f"#SBATCH --time={time_limit}\n"
+        "#SBATCH --ntasks=1\n"
+        "#SBATCH --cpus-per-task=4\n"
+        "set -euo pipefail\n"
+        f"{body}"
+    )
     (root / "job.sbatch").write_text(job)
     return root
 
@@ -243,7 +316,12 @@ def cmd_submit(args: argparse.Namespace) -> int:
     ref = getattr(args, "spipe_ref", None) or getattr(args, "neksnap_ref", None) or "unknown"
     rid = run_id(args.workflow, args.case, ref)
     repos = {"spipe": getattr(args, "spipe_ref", None), "neksnap": getattr(args, "neksnap_ref", None)}
-    packet = build_packet(cfg, rid, args.workflow, args.case, repos, {})
+    extra: dict[str, Any] = {}
+    if getattr(args, "registry", None):
+        extra["registry"] = args.registry
+    if getattr(args, "pattern", None):
+        extra["pattern"] = args.pattern
+    packet = build_packet(cfg, rid, args.workflow, args.case, repos, extra)
     upload_packet(cfg, rid, packet)
     receipt = base_receipt(cfg, rid, args.workflow, args.case, repos)
     if not args.manual:
@@ -435,12 +513,14 @@ def build_parser() -> argparse.ArgumentParser:
     pr = ss.add_parser("process")
     pr.add_argument("case")
     pr.add_argument("--spipe-ref", required=True)
+    pr.add_argument("--registry", help="path to a spipe registry.toml; minimal one generated if omitted")
     pr.add_argument("--manual", action="store_true")
     pr.set_defaults(func=cmd_submit)
 
     rr = ss.add_parser("render")
     rr.add_argument("case")
     rr.add_argument("--neksnap-ref", required=True)
+    rr.add_argument("--pattern", default="*0.f0*", help="snapshot glob inside the case dir")
     rr.add_argument("--manual", action="store_true")
     rr.set_defaults(func=cmd_submit)
 
