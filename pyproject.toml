@@ -5,15 +5,58 @@ build-backend = "hatchling.build"
 [project]
 name = "jz-pilot"
 version = "0.1.0"
-description = "Jean Zay orchestration CLI for run packets, Slurm jobs, receipts, and artifact sync."
+description = "Jean Zay orchestration CLI for SSH, Slurm run packets, receipts, and artifact sync."
 readme = "README.md"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+  { name = "Ricardo A. S. Frantz" },
+]
+keywords = ["hpc", "slurm", "ssh", "jean-zay", "nek5000", "workflow", "cli"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Scientific/Engineering",
+  "Topic :: System :: Distributed Computing",
+  "Topic :: Utilities",
+]
 dependencies = [
   "PyYAML>=6.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/ricardofrantz/jz_pilot"
+Repository = "https://github.com/ricardofrantz/jz_pilot"
+Issues = "https://github.com/ricardofrantz/jz_pilot/issues"
+
 [project.scripts]
 jzp = "jz_pilot.cli:main"
 
+[dependency-groups]
+dev = [
+  "build>=1.2",
+  "pytest>=8.0",
+  "ruff>=0.8",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/jz_pilot"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]

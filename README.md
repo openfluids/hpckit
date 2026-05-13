@@ -1,13 +1,21 @@
 # jz_pilot
 
-`jzp` is a Jean Zay cockpit CLI for the myproject workflow. It manages remote tool checkouts, immutable per-SHA virtualenvs, run packets, Slurm submission/polling, receipts, artifact sync, and local run ledgers.
+`jzp` is a small Python CLI for orchestrating Jean Zay workflows from a local project checkout. It manages remote tool checkouts, immutable per-SHA virtualenvs, run packets, Slurm submission/polling, receipts, artifact sync, and local run ledgers.
+
+The first target project is `myproject`, but the package is intentionally separate from that repository: configuration lives in the calling project via `.jz-manager.yaml`.
 
 ## Install
 
+For local development:
+
 ```bash
 uv pip install -e .
-# or
-pip install -e .
+```
+
+For command-line use from another checkout:
+
+```bash
+pipx install git+https://github.com/ricardofrantz/jz_pilot.git
 ```
 
 ## Configure
@@ -36,12 +44,24 @@ artifact_sync:
 jzp doctor
 jzp status
 jzp update-repo spipe --ref <sha-or-branch> --repo-url <git-url>
+jzp update-repo neksnap --ref <sha-or-branch> --repo-url <git-url>
 jzp submit process mycase/340 --spipe-ref <sha>
 jzp submit render mycase/355 --neksnap-ref <sha>
 jzp submit sparse mycase/340 --to 22224
 jzp poll [run_id]
 jzp sync-artifacts <run_id>
 jzp receipt <run_id>
+python -m jz_pilot doctor
 ```
+
+## Development
+
+```bash
+uv sync --group dev
+uv run pytest
+uv run python -m build
+```
+
+The repository uses the PyPA-recommended `src/` layout, standard `pyproject.toml` metadata, a public `[project.scripts]` entry point, and dependency groups for maintainer tooling.
 
 Destructive remote cleanup is intentionally not implemented. Sparse continuation edits only the case-local `check_restart.py` knobs and records the backup name in the receipt.

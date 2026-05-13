@@ -7,3 +7,6 @@ __pycache__/
 jz_manager/receipts/
 data/jz_processed/
 plots/jz_renders/
+
+dist/
+*.egg-info/
