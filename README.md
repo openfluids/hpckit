@@ -18,6 +18,14 @@ For command-line use from another checkout:
 pipx install git+https://github.com/ricardofrantz/jz_pilot.git
 ```
 
+## Quickstart
+
+```bash
+cd /path/to/your/project
+jzp init --project myproject
+jzp doctor
+```
+
 ## Configure
 
 Create `.jz-manager.yaml` in the project where you run `jzp`:

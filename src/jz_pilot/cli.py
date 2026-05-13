@@ -365,10 +365,50 @@ def cmd_receipt(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_init(args: argparse.Namespace) -> int:
+    project = args.project or Path.cwd().name
+    remote = args.remote
+    work_root = args.work_root
+    scratch_root = args.scratch_root
+    cfg_path = Path(".jz-manager.yaml")
+    if cfg_path.exists() and not args.force:
+        print(f"{cfg_path} already exists; use --force to overwrite", file=sys.stderr)
+        return 1
+    data = {
+        "project": project,
+        "remote": remote,
+        "work_root": work_root,
+        "scratch_root": scratch_root,
+        "remote_repos_root": f"{work_root}/repos",
+        "remote_state_root": f"{work_root}/.jz-manager",
+        "ledger": "JZ_RUN_LOG.md",
+        "beads": ".beads",
+        "artifact_sync": {
+            "processed": "data/jz_processed",
+            "renders": "plots/jz_renders",
+            "paper_figs": "paper/figs",
+            "receipts": "jz_manager/receipts",
+        },
+    }
+    cfg_path.write_text(yaml.safe_dump(data, sort_keys=False))
+    Path("jz_manager/receipts").mkdir(parents=True, exist_ok=True)
+    Path(".jz-manager").mkdir(parents=True, exist_ok=True)
+    print(str(cfg_path.resolve()))
+    print("Next: jzp doctor")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="jzp")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("doctor").set_defaults(func=cmd_doctor)
+    ini = sub.add_parser("init")
+    ini.add_argument("--project")
+    ini.add_argument("--remote", default="jz")
+    ini.add_argument("--work-root", default="/path/to/work")
+    ini.add_argument("--scratch-root", default="/path/to/scratch")
+    ini.add_argument("--force", action="store_true")
+    ini.set_defaults(func=cmd_init)
     sub.add_parser("status").set_defaults(func=cmd_status)
     u = sub.add_parser("update-repo")
     u.add_argument("tool", choices=sorted(TOOLS)); u.add_argument("--ref", required=True); u.add_argument("--repo-url")
