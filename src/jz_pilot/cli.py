@@ -15,7 +15,7 @@ from typing import Any
 import yaml
 
 TOOLS = {"spipe", "neksnap", "dsgbr", "dynachaos"}
-WORKFLOWS = {"process", "render", "sparse", "dense"}
+WORKFLOWS = {"process", "render", "plot", "sparse", "dense"}
 
 
 @dataclass
@@ -223,7 +223,8 @@ def build_packet(cfg: Config, rid: str, workflow: str, case: str, repos: dict[st
     (root / "run.yaml").write_text(yaml.safe_dump(run_yaml, sort_keys=False))
 
     remote_run = f"{cfg.remote_state_root}/runs/{rid}"
-    out_kind = "renders" if workflow == "render" else "processed"
+    _out_kind_map = {"render": "renders", "plot": "figures"}
+    out_kind = _out_kind_map.get(workflow, "processed")
     remote_out = f"{cfg.remote_state_root}/outputs/{out_kind}/{rid}"
     venv = f"{cfg.work_root}/.venv"
 
@@ -257,6 +258,26 @@ def build_packet(cfg: Config, rid: str, workflow: str, case: str, repos: dict[st
             f'echo "DONE render {case} -> {remote_out}"\n'
         )
         time_limit = "04:00:00"
+    elif workflow == "plot":
+        kind = extra.get("kind") or case
+        registry_arg = ""
+        registry_src = extra.get("registry")
+        if registry_src:
+            src = Path(registry_src).expanduser()
+            if not src.is_absolute():
+                src = (cfg.root / src).resolve()
+            if not src.exists():
+                raise SystemExit(f"--registry path not found: {src}")
+            (root / "registry.toml").write_text(src.read_text())
+            registry_arg = f' \\\n  --registry {shell_quote(remote_run + "/registry.toml")}'
+        body = (
+            f'mkdir -p {shell_quote(remote_out)}\n'
+            f'{shell_quote(venv + "/bin/python")} -m spipe.cli plot \\\n'
+            f'  --kind {shell_quote(kind)} \\\n'
+            f'  --output-root {shell_quote(remote_out)}{registry_arg}\n'
+            f'echo "DONE plot {kind} -> {remote_out}"\n'
+        )
+        time_limit = "00:30:00"
     else:
         body = f"echo 'jzp run {rid}'\necho 'workflow {workflow}'\necho 'case {case}'\n"
         time_limit = "00:30:00"
@@ -313,6 +334,10 @@ def cmd_submit(args: argparse.Namespace) -> int:
     cfg = load_config()
     if args.workflow == "sparse":
         return submit_sparse(cfg, args)
+    # For `submit plot <kind>` the positional is named `kind`; mirror it onto
+    # `case` so the run_id / receipt path is uniform across workflows.
+    if args.workflow == "plot" and not getattr(args, "case", None):
+        args.case = args.kind
     ref = getattr(args, "spipe_ref", None) or getattr(args, "neksnap_ref", None) or "unknown"
     rid = run_id(args.workflow, args.case, ref)
     repos = {"spipe": getattr(args, "spipe_ref", None), "neksnap": getattr(args, "neksnap_ref", None)}
@@ -321,6 +346,8 @@ def cmd_submit(args: argparse.Namespace) -> int:
         extra["registry"] = args.registry
     if getattr(args, "pattern", None):
         extra["pattern"] = args.pattern
+    if getattr(args, "kind", None):
+        extra["kind"] = args.kind
     packet = build_packet(cfg, rid, args.workflow, args.case, repos, extra)
     upload_packet(cfg, rid, packet)
     receipt = base_receipt(cfg, rid, args.workflow, args.case, repos)
@@ -554,6 +581,13 @@ def build_parser() -> argparse.ArgumentParser:
     rr.add_argument("--pattern", default="*0.f0*", help="snapshot glob inside the case dir")
     rr.add_argument("--manual", action="store_true")
     rr.set_defaults(func=cmd_submit)
+
+    pl = ss.add_parser("plot", help="render a spipe.figures paper figure on JZ")
+    pl.add_argument("kind", help="figure name (must match spipe.figures registry, e.g. fig9)")
+    pl.add_argument("--spipe-ref", required=True)
+    pl.add_argument("--registry", help="optional registry.toml supplied by the cockpit")
+    pl.add_argument("--manual", action="store_true")
+    pl.set_defaults(func=cmd_submit)
 
     sp = ss.add_parser("sparse")
     sp.add_argument("case")

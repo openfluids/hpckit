@@ -283,6 +283,37 @@ def test_build_packet_render_emits_neksnap_call(tmp_path, monkeypatch) -> None:
     assert "/work/demo/.jz-manager/outputs/renders/rid" in sbatch
 
 
+def test_build_packet_plot_emits_spipe_call(tmp_path, monkeypatch) -> None:
+    import jz_pilot.cli as cli
+    cfg_path = tmp_path / ".jz-manager.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "project": "Demo",
+                "remote": "jz",
+                "work_root": "/work/demo",
+                "remote_state_root": "/work/demo/.jz-manager",
+            }
+        )
+    )
+    monkeypatch.chdir(tmp_path)
+    cfg = cli.load_config()
+    packet = cli.build_packet(cfg, "rid", "plot", "fig9", {"spipe": "abc"}, {"kind": "fig9"})
+    sbatch = (packet / "job.sbatch").read_text()
+    assert "/work/demo/.venv/bin/python" in sbatch
+    assert "spipe.cli plot" in sbatch
+    assert "--kind fig9" in sbatch
+    assert "/work/demo/.jz-manager/outputs/figures/rid" in sbatch
+
+
+def test_plot_subparser_accepts_kind() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["submit", "plot", "fig9", "--spipe-ref", "abc", "--manual"])
+    assert args.workflow == "plot"
+    assert args.kind == "fig9"
+    assert args.spipe_ref == "abc"
+
+
 def test_ssh_lstrips_and_quotes_script(tmp_path, monkeypatch) -> None:
     """ssh joins argv[2:] with spaces, so the script must be passed as a
     single shlex-quoted argument or only the first token reaches the inner
