@@ -132,6 +132,52 @@ def test_publish_receipt_creates_temp_dir_from_fresh_project(tmp_path, monkeypat
     assert calls and calls[0][0] == "scp"
 
 
+def test_sparse_subparser_accepts_dry_run() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["submit", "sparse", "cube_7/282", "--to", "5000", "--dry-run"])
+    assert args.dry_run is True
+    assert args.to == 5000.0
+
+
+def test_submit_sparse_dry_run_skips_mutation_and_sbatch(monkeypatch, tmp_path) -> None:
+    """Dry-run sparse must not mutate check_restart.py or call sbatch — only
+    parse and report. The fake ssh records the script it received so we can
+    assert no sbatch / sed-replace text leaks into a dry-run probe.
+    """
+    import subprocess
+    import jz_pilot.cli as cli
+
+    cfg = cli.Config(
+        root=tmp_path, project="Demo", remote="jz", work_root="/work/demo",
+        scratch_root=None, remote_repos_root="/work/demo/repos",
+        remote_state_root="/work/demo/.jz-manager", ledger=tmp_path / "L",
+        artifact_sync={},
+    )
+    captured = {}
+
+    def fake_ssh(_cfg, script, *, check=True):
+        captured["script"] = script
+        # Simulate the probe printing the JZP_PROBE sentinel line
+        return subprocess.CompletedProcess(
+            ["ssh"], 0,
+            "JZP_PROBE 10000 1000 5600 check_restart.py.preXXX_TS\n",
+            "",
+        )
+
+    monkeypatch.setattr(cli, "ssh", fake_ssh)
+
+    args = build_parser().parse_args(["submit", "sparse", "cube_7/282", "--to", "5500", "--dry-run"])
+    assert cli.submit_sparse(cfg, args) == 0
+    sent = captured["script"]
+    # Dry-run script should contain probes...
+    assert "old_target=" in sent
+    assert "JZP_PROBE" in sent
+    # ...but NEVER the mutation step or sbatch
+    assert "cp check_restart.py" not in sent
+    assert "sbatch jz.pbs" not in sent
+    assert "p.write_text(s)" not in sent
+
+
 def test_submit_sparse_uses_python_boolean_literals(monkeypatch, tmp_path) -> None:
     import subprocess
     import jz_pilot.cli as cli

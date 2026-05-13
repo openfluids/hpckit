@@ -342,7 +342,12 @@ def submit_sparse(cfg: Config, args: argparse.Namespace) -> int:
     rid = run_id("sparse", case, dom)
     force = "True" if args.force_reconcile else "False"
     chunk_line = "" if args.chunk is None else f"new_chunk={float(args.chunk)}"
-    script = f"""
+    dry_run = bool(getattr(args, "dry_run", False))
+
+    # Probe-only half: parses helper constants, validates jz.pbs + .par, prints
+    # a SENTINEL line on success. No file is mutated. Used by --dry-run, then
+    # repeated as the first step of the real submit.
+    probe = f"""
 set -euo pipefail
 case_dir={shell_quote(cfg.work_root + '/' + case)}
 cd "$case_dir"
@@ -385,6 +390,32 @@ if par:
     if pe > old_target + 1e-9 and not force:
         raise SystemExit(f'.par endTime {{pe}} is past helper target {{old_target}}; use --force-reconcile')
 PY
+would_backup="check_restart.py.pre${{old_target}}_{utc_now()}"
+printf 'JZP_PROBE %s %s %s %s\\n' "$old_target" "$old_chunk" "$par_end" "$would_backup"
+"""
+
+    if dry_run:
+        cp = ssh(cfg, probe)
+        parts = [ln for ln in cp.stdout.strip().splitlines() if ln.startswith("JZP_PROBE ")]
+        if not parts:
+            raise SystemExit(f"sparse dry-run probe returned no JZP_PROBE line:\n{cp.stdout}\n{cp.stderr}")
+        _, old_target, old_chunk, par_end, would_backup = parts[-1].split(maxsplit=4)
+        new_chunk = float(args.chunk) if args.chunk is not None else float(old_chunk)
+        print(
+            f"DRY-RUN sparse continuation for {case}\n"
+            f"  current target_end_time = {old_target}\n"
+            f"  current single_job_time = {old_chunk}\n"
+            f"  current .par endTime    = {par_end or '(none found)'}\n"
+            f"  would set target_end_time = {float(args.to)}\n"
+            f"  would set single_job_time = {new_chunk}\n"
+            f"  would back up to         = {would_backup}\n"
+            f"  would sbatch jz.pbs      (skipped in dry-run)"
+        )
+        return 0
+
+    # Real submit: probe (with same sentinel), then mutate + sbatch.
+    mutate = f"""
+{probe}
 backup="check_restart.py.pre${{old_target}}_{utc_now()}"
 cp check_restart.py "$backup"
 python3 - <<PY
@@ -398,9 +429,9 @@ if {args.chunk is not None}:
 p.write_text(s)
 PY
 job=$(sbatch jz.pbs | awk '{{print $NF}}')
-printf '%s %s %s %s\n' "$job" "$backup" "$old_target" "$old_chunk"
+printf '%s %s %s %s\\n' "$job" "$backup" "$old_target" "$old_chunk"
 """
-    cp = ssh(cfg, script)
+    cp = ssh(cfg, mutate)
     job, backup, old_target, old_chunk = cp.stdout.strip().split()[-4:]
     receipt = base_receipt(cfg, rid, "sparse", case, {})
     receipt.update({"job_id": job, "status": "submitted", "submitted_at": dt.datetime.now(dt.timezone.utc).isoformat(), "target_end_time": float(args.to), "single_job_time": float(args.chunk) if args.chunk else None, "backup_file": backup, "previous_target_end_time": old_target, "previous_single_job_time": old_chunk})
@@ -526,6 +557,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = ss.add_parser("sparse")
     sp.add_argument("case")
+    sp.add_argument("--dry-run", action="store_true", help="probe + report; do not mutate check_restart.py or sbatch")
     sp.add_argument("--to", required=True, type=float)
     sp.add_argument("--chunk", type=float)
     sp.add_argument("--force-reconcile", action="store_true")
