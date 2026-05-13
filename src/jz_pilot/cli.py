@@ -16,6 +16,14 @@ import yaml
 
 TOOLS = {"spipe", "neksnap", "dsgbr", "dynachaos"}
 WORKFLOWS = {"process", "render", "plot", "sparse", "dense"}
+# Where each workflow's output lands under $WORK/.jz-manager/outputs/.
+# Used by build_packet, base_receipt, and cmd_sync_artifacts to stay in sync.
+WORKFLOW_OUTPUT_KIND = {"render": "renders", "plot": "figures"}
+DEFAULT_OUTPUT_KIND = "processed"
+
+
+def output_kind(workflow: str) -> str:
+    return WORKFLOW_OUTPUT_KIND.get(workflow, DEFAULT_OUTPUT_KIND)
 
 
 @dataclass
@@ -223,9 +231,7 @@ def build_packet(cfg: Config, rid: str, workflow: str, case: str, repos: dict[st
     (root / "run.yaml").write_text(yaml.safe_dump(run_yaml, sort_keys=False))
 
     remote_run = f"{cfg.remote_state_root}/runs/{rid}"
-    _out_kind_map = {"render": "renders", "plot": "figures"}
-    out_kind = _out_kind_map.get(workflow, "processed")
-    remote_out = f"{cfg.remote_state_root}/outputs/{out_kind}/{rid}"
+    remote_out = f"{cfg.remote_state_root}/outputs/{output_kind(workflow)}/{rid}"
     venv = f"{cfg.work_root}/.venv"
 
     if workflow == "process":
@@ -313,7 +319,7 @@ def base_receipt(cfg: Config, rid: str, workflow: str, case: str, repos: dict[st
         "case": case,
         "job_id": None,
         "remote_case_path": f"{cfg.work_root}/{case}",
-        "remote_output_path": f"{cfg.remote_state_root}/outputs/{'renders' if workflow == 'render' else 'processed'}/{rid}",
+        "remote_output_path": f"{cfg.remote_state_root}/outputs/{output_kind(workflow)}/{rid}",
         "repos": repos,
         "status": "prepared",
         "submitted_at": None,
@@ -489,7 +495,7 @@ def cmd_sync_artifacts(args: argparse.Namespace) -> int:
     cfg = load_config()
     receipt = read_receipt(cfg, args.run_id)
     workflow = receipt["workflow"]
-    key = "renders" if workflow == "render" else "processed"
+    key = output_kind(workflow)
     dest = project_path(cfg, cfg.artifact_sync.get(key, f"data/jz_{key}")) / args.run_id
     dest.mkdir(parents=True, exist_ok=True)
     src = receipt["remote_output_path"].rstrip("/") + "/"
@@ -535,6 +541,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         "artifact_sync": {
             "processed": "data/jz_processed",
             "renders": "plots/jz_renders",
+            "figures": "data/jz_figures",
             "paper_figs": "paper/figs",
             "receipts": "jz_manager/receipts",
         },
