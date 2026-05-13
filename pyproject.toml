@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jz-pilot"
+version = "0.1.0"
+description = "Jean Zay orchestration CLI for run packets, Slurm jobs, receipts, and artifact sync."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "PyYAML>=6.0",
+]
+
+[project.scripts]
+jzp = "jz_pilot.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jz_pilot"]

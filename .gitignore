@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.jz-manager/runs/
+.jz-manager/*.receipt.json
+jz_manager/receipts/
+data/jz_processed/
+plots/jz_renders/
