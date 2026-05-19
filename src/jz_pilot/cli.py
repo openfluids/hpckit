@@ -411,7 +411,10 @@ par_end=$(python3 - <<'PY'
 import pathlib,re
 for p in pathlib.Path('.').glob('*.par'):
     s=p.read_text(errors='ignore')
-    m=re.search(r'endTime\\s*=\\s*([0-9.eE+-]+)', s)
+    # Case-insensitive: .par files in the legacy fleet often use lowercase
+    # 'endtime' (e.g. sphere_5/345), while newer cases use camelCase 'endTime'
+    # (e.g. mycase/340). Refresh script lowercases all keys; mirror that.
+    m=re.search(r'endTime\\s*=\\s*([0-9.eE+-]+)', s, re.IGNORECASE)
     if m:
         print(m.group(1)); break
 PY

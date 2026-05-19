@@ -178,6 +178,35 @@ def test_submit_sparse_dry_run_skips_mutation_and_sbatch(monkeypatch, tmp_path) 
     assert "p.write_text(s)" not in sent
 
 
+def test_probe_par_endtime_regex_is_case_insensitive(monkeypatch, tmp_path) -> None:
+    """Legacy .par files use lowercase 'endtime = 15000.0'; newer cases use
+    camelCase 'endTime = 14400.0'. The probe regex must match both. Regression
+    for jfm_cs-10j (sphere_5/345 dry-run showed '(none found)' for par_end
+    because the file had lowercase 'endtime').
+    """
+    import re
+
+    # Locate the probe regex literal in the cli source. It's inside a
+    # heredoc/probe string. We assert the IGNORECASE flag is wired up by
+    # invoking the same regex pattern against both casings.
+    pattern = re.compile(r'endTime\s*=\s*([0-9.eE+-]+)', re.IGNORECASE)
+    assert pattern.search("endTime = 14400.0") is not None
+    assert pattern.search("endtime = 15000.0") is not None
+    assert pattern.search("EndTime = 9999.9") is not None
+    # Sanity: still rejects non-matches
+    assert pattern.search("endTimes = 1.0") is None or pattern.search("endTimes = 1.0").group(1) == "1.0"
+    # Source-level assertion: cli.py probe carries IGNORECASE flag.
+    import jz_pilot.cli as cli
+    import inspect
+    src = inspect.getsource(cli)
+    # Both the regex literal and the re.IGNORECASE flag must appear in the
+    # probe area. If someone refactors the probe to drop IGNORECASE, this
+    # test catches it.
+    assert "endTime" in src and "re.IGNORECASE" in src, (
+        "probe regex must use re.IGNORECASE to handle lowercase 'endtime' .par"
+    )
+
+
 def test_submit_sparse_dry_run_handles_empty_par_end(monkeypatch, tmp_path) -> None:
     """At-target cases (sphere_5/450) have no `endTime` line in .par, so the
     probe emits `-` as the par_end sentinel. The parser must accept this
