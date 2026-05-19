@@ -178,6 +178,35 @@ def test_submit_sparse_dry_run_skips_mutation_and_sbatch(monkeypatch, tmp_path) 
     assert "p.write_text(s)" not in sent
 
 
+def test_submit_sparse_dry_run_handles_empty_par_end(monkeypatch, tmp_path) -> None:
+    """At-target cases (sphere_5/450) have no `endTime` line in .par, so the
+    probe emits `-` as the par_end sentinel. The parser must accept this
+    without raising 'expected 5, got 4'. Regression test for the bug found
+    during jfm_cs-11r pilot migration on 2026-05-19.
+    """
+    import subprocess
+    import jz_pilot.cli as cli
+
+    cfg = cli.Config(
+        root=tmp_path, project="Demo", remote="jz", work_root="/work/demo",
+        scratch_root=None, remote_repos_root="/work/demo/repos",
+        remote_state_root="/work/demo/.jz-manager", ledger=tmp_path / "L",
+        artifact_sync={},
+    )
+
+    def fake_ssh(_cfg, _script, *, check=True):
+        # Probe with `-` sentinel for empty par_end (.par has no endTime line)
+        return subprocess.CompletedProcess(
+            ["ssh"], 0,
+            "JZP_PROBE 5000 1000 - check_restart.py.pre5000_TS\n",
+            "",
+        )
+
+    monkeypatch.setattr(cli, "ssh", fake_ssh)
+    args = build_parser().parse_args(["submit", "sparse", "sphere_5/450", "--to", "5000", "--dry-run"])
+    assert cli.submit_sparse(cfg, args) == 0
+
+
 def test_submit_sparse_uses_python_boolean_literals(monkeypatch, tmp_path) -> None:
     import subprocess
     import jz_pilot.cli as cli

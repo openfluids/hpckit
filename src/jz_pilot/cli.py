@@ -424,7 +424,9 @@ if par:
         raise SystemExit(f'.par endTime {{pe}} is past helper target {{old_target}}; use --force-reconcile')
 PY
 would_backup="check_restart.py.pre${{old_target}}_{utc_now()}"
-printf 'JZP_PROBE %s %s %s %s\\n' "$old_target" "$old_chunk" "$par_end" "$would_backup"
+# Emit '-' sentinel for empty par_end so the 5-field structure is preserved
+# even for at-target cases whose .par has no endTime line.
+printf 'JZP_PROBE %s %s %s %s\\n' "$old_target" "$old_chunk" "${{par_end:--}}" "$would_backup"
 """
 
     if dry_run:
@@ -433,6 +435,8 @@ printf 'JZP_PROBE %s %s %s %s\\n' "$old_target" "$old_chunk" "$par_end" "$would_
         if not parts:
             raise SystemExit(f"sparse dry-run probe returned no JZP_PROBE line:\n{cp.stdout}\n{cp.stderr}")
         _, old_target, old_chunk, par_end, would_backup = parts[-1].split(maxsplit=4)
+        if par_end == "-":
+            par_end = ""  # sentinel back to empty for downstream display
         new_chunk = float(args.chunk) if args.chunk is not None else float(old_chunk)
         print(
             f"DRY-RUN sparse continuation for {case}\n"
