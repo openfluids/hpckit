@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "hpckit"
 version = "0.1.0"
-description = "Jean Zay orchestration CLI for SSH, Slurm run packets, receipts, and artifact sync."
+description = "HPC orchestration CLI for SSH, Slurm run packets, receipts, and artifact sync."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -13,7 +13,7 @@ license-files = ["LICENSE"]
 authors = [
   { name = "Ricardo A. S. Frantz" },
 ]
-keywords = ["hpc", "slurm", "ssh", "jean-zay", "nek5000", "workflow", "cli"]
+keywords = ["hpc", "slurm", "ssh", "cluster", "nek5000", "workflow", "cli"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
@@ -32,6 +32,15 @@ classifiers = [
 ]
 dependencies = [
   "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+# hpckit itself only dispatches; it needs nothing but a YAML parser. The
+# renderer extra pulls in quadros for anyone who wants to render locally as
+# well as on the cluster. It is deliberately optional: quadros brings VTK,
+# which is ~700 MB, and a machine that only submits jobs should not pay that.
+renderer = [
+  "quadros",
 ]
 
 [project.urls]

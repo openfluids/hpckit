@@ -1,8 +1,20 @@
 # hpckit
 
-`hpckit` is a small Python CLI for orchestrating Jean Zay workflows from a local project checkout. It manages remote tool checkouts, immutable per-SHA virtualenvs, run packets, Slurm submission/polling, receipts, artifact sync, and local run ledgers.
+`hpckit` is a small Python CLI for orchestrating Slurm cluster workflows from a
+local project checkout. It manages remote tool checkouts, immutable per-SHA
+virtualenvs, run packets, Slurm submission and polling, receipts, artifact sync,
+and local run ledgers.
 
-The first target project is `myproject`, but the package is intentionally separate from that repository: configuration lives in the calling project via `.hpckit.yaml`.
+The tools it runs are declared in your own `.hpckit.yaml` — `hpckit` ships none
+of them. It needs only a YAML parser itself; if you also want to render fields
+locally, install the optional renderer extra:
+
+```bash
+pip install 'hpckit[renderer]'   # pulls in quadros (brings VTK, ~700 MB)
+```
+
+Configuration lives in the project you run it from, not in this repository, so one
+installation drives any number of projects.
 
 ## Install
 
