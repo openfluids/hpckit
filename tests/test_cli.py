@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import yaml
 
 from hpckit.cli import build_parser, case_slug, run_id, short_ref
@@ -49,6 +51,7 @@ def _write_cfg(tmp_path, **extra) -> None:
         "tools": DEMO_TOOLS,
         "job_types": DEMO_JOB_TYPES,
         "artifact_sync": {"receipts": "hpckit/receipts"},
+        "slurm": {"account": "demo@cpu", "partition": "prepost"},
     }
     data.update(extra)
     (tmp_path / ".hpckit.yaml").write_text(yaml.safe_dump(data))
@@ -78,6 +81,29 @@ def _cfg(tmp_path, **kwargs):
 
 def test_case_slug_replaces_slashes() -> None:
     assert case_slug("mycase/340") == "mycase_340"
+
+
+def test_case_slug_strips_shell_metacharacters() -> None:
+    """A case name reaches a remote shell, so it must not carry metacharacters.
+
+    run_id() embeds case_slug() output, and run_id becomes an rsync remote path
+    (`host:path`, which rsync hands to a shell on the far side) and a Slurm
+    --job-name. short_ref() already reduces the git ref to [A-Za-z0-9]; the case
+    was left unfiltered, so `;`, `$(...)`, quotes and spaces survived the whole
+    way to the cluster.
+    """
+    assert case_slug("x;touch /tmp/pwned") == "x_touch__tmp_pwned"
+    assert case_slug("a$(id)b") == "a__id_b"
+    assert case_slug("my case") == "my_case"
+    assert case_slug("q'uote") == "q_uote"
+    # ordinary names keep the characters that make them readable
+    assert case_slug("mycase/340") == "mycase_340"
+    assert case_slug("cube-281_v2.1") == "cube-281_v2.1"
+
+
+def test_run_id_contains_only_safe_path_characters() -> None:
+    rid = run_id("process", "x;touch /tmp/p", "feature/foo")
+    assert re.fullmatch(r"[A-Za-z0-9._-]+", rid), rid
 
 
 def test_short_ref_sanitizes_and_truncates() -> None:
@@ -320,6 +346,46 @@ def test_submit_sparse_uses_python_boolean_literals(monkeypatch, tmp_path) -> No
     assert "sbatch job.batch" in captured["script"] or "sbatch 'job.batch'" in captured["script"]
 
 
+def test_build_packet_uses_slurm_settings_from_config(tmp_path, monkeypatch) -> None:
+    """Slurm account and partition are site-specific, so they come from config.
+
+    They were hardcoded to one IDRIS allocation and one Jean Zay partition,
+    which made the README's "configuration lives in the project you run it
+    from" untrue and left the tool unusable elsewhere without a source edit.
+    """
+    import hpckit.cli as cli
+
+    _write_cfg(
+        tmp_path,
+        slurm={"account": "abc@gpu", "partition": "compute", "ntasks": 2, "cpus_per_task": 8},
+    )
+    monkeypatch.chdir(tmp_path)
+    cfg = cli.load_config()
+    packet = cli.build_packet(cfg, "rid42", "process", "mycase/340", {"sigtool": "abc1234"}, {})
+
+    sbatch = (packet / "job.sbatch").read_text()
+    assert "#SBATCH --account=abc@gpu" in sbatch
+    assert "#SBATCH --partition=compute" in sbatch
+    assert "#SBATCH --ntasks=2" in sbatch
+    assert "#SBATCH --cpus-per-task=8" in sbatch
+    assert "vpo@cpu" not in sbatch
+    assert "prepost" not in sbatch
+
+
+def test_build_packet_requires_a_slurm_account(tmp_path, monkeypatch) -> None:
+    """No default account: like work_root, there is no sane value to invent."""
+    import pytest
+
+    import hpckit.cli as cli
+
+    _write_cfg(tmp_path, slurm={})  # explicitly no slurm settings
+    monkeypatch.chdir(tmp_path)
+    cfg = cli.load_config()
+    with pytest.raises(SystemExit) as excinfo:
+        cli.build_packet(cfg, "rid42", "process", "mycase/340", {"sigtool": "abc1234"}, {})
+    assert "slurm.account" in str(excinfo.value)
+
+
 def test_build_packet_process_emits_sbatch_calling_venv(tmp_path, monkeypatch) -> None:
     import hpckit.cli as cli
 
@@ -330,7 +396,7 @@ def test_build_packet_process_emits_sbatch_calling_venv(tmp_path, monkeypatch) -
 
     sbatch = (packet / "job.sbatch").read_text()
     assert "#SBATCH --job-name=rid42" in sbatch
-    assert "#SBATCH --account=vpo@cpu" in sbatch
+    assert "#SBATCH --account=demo@cpu" in sbatch
     assert "#SBATCH --partition=prepost" in sbatch
     assert "/work/demo/.venv/bin/python" in sbatch
     assert "sigtool.cli process" in sbatch
@@ -462,6 +528,42 @@ def test_process_subparser_accepts_registry(tmp_path, monkeypatch) -> None:
         ]
     )
     assert args.registry == "case_registries/sphere.toml"
+
+
+def test_rsync_protects_remote_paths_from_the_remote_shell(tmp_path, monkeypatch) -> None:
+    """rsync must be told not to let a shell expand the remote path.
+
+    Unlike ssh, where the whole script is shlex.quote'd into one argument,
+    `rsync host:path` hands `path` to a shell on the far side. A space splits it
+    into two source arguments and metacharacters are interpreted. `-s`
+    (--secluded-args) sends the path over the protocol instead. run_id is
+    sanitised too, but remote_state_root comes straight from user config, so
+    this is the backstop rather than the only defence.
+    """
+    import subprocess
+
+    import hpckit.cli as cli
+
+    _write_cfg(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    cfg = cli.load_config()
+    calls = []
+
+    def fake_run(cmd, *, check=True, cwd=None):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "ssh", lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""))
+
+    packet = tmp_path / "packet"
+    packet.mkdir()
+    cli.upload_packet(cfg, "rid42", packet)
+
+    rsync_calls = [c for c in calls if c and c[0] == "rsync"]
+    assert rsync_calls, calls
+    for cmd in rsync_calls:
+        assert "-s" in cmd, cmd
 
 
 def test_sync_artifacts_fails_closed_when_rsync_fails(tmp_path, monkeypatch) -> None:

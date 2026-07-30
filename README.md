@@ -61,6 +61,11 @@ remote_state_root: /path/to/work/.hpckit
 ledger: HPCKIT_RUN_LOG.md
 job_script: job.batch
 restart_helper: check_restart.py
+slurm:
+  account: myproj@cpu   # required — no default
+  partition: prepost
+  ntasks: 1
+  cpus_per_task: 4
 tools:
   sigtool:
     repo_url: git@github.com:myorg/sigtool.git

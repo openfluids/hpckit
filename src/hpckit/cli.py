@@ -37,6 +37,7 @@ class Config:
     restart_helper: str = DEFAULT_RESTART_HELPER
     tools: dict[str, dict[str, Any]] = field(default_factory=dict)
     job_types: dict[str, dict[str, Any]] = field(default_factory=dict)
+    slurm: dict[str, Any] = field(default_factory=dict)
 
 
 class _FormatMap(dict):
@@ -84,6 +85,7 @@ def try_load_config(start: Path | None = None) -> Config | None:
                 restart_helper=data.get("restart_helper", DEFAULT_RESTART_HELPER),
                 tools={str(k): (v if isinstance(v, dict) else {}) for k, v in tools.items()},
                 job_types={str(k): (v if isinstance(v, dict) else {}) for k, v in job_types.items()},
+                slurm=data.get("slurm") if isinstance(data.get("slurm"), dict) else {},
             )
     return None
 
@@ -118,7 +120,17 @@ def short_ref(ref: str) -> str:
 
 
 def case_slug(case: str) -> str:
-    return case.strip("/").replace("/", "_")
+    """Reduce a case name to characters that are safe in a path and a shell word.
+
+    The result is embedded in run_id(), which becomes an rsync remote path
+    (`host:path` — rsync hands the path to a shell on the far side) and a Slurm
+    --job-name. short_ref() already reduces the git ref to [A-Za-z0-9] for the
+    same reason; the case name was left unfiltered, so a space split the rsync
+    argument in two and `;` or `$(...)` reached the remote shell intact.
+
+    `.`, `-` and `_` are kept because real case names use them (`cube-281_v2.1`).
+    """
+    return re.sub(r"[^A-Za-z0-9._-]", "_", case.strip("/"))
 
 
 def run_id(workflow: str, case: str, ref: str) -> str:
@@ -372,16 +384,33 @@ def build_packet(cfg: Config, rid: str, workflow: str, case: str, repos: dict[st
         body = f"echo 'hpckit run {rid}'\necho 'workflow {workflow}'\necho 'case {case}'\n"
         time_limit = "00:30:00"
 
+    # Account and partition name a specific allocation on a specific machine, so
+    # they belong in the project's .hpckit.yaml, not in this source file. There
+    # is no defensible default for an account — same reasoning as work_root, so
+    # the tool refuses rather than guessing. Partition and the task counts do
+    # have workable defaults.
+    account = cfg.slurm.get("account")
+    if not account:
+        raise SystemExit(
+            "slurm.account missing in .hpckit.yaml — add e.g.\n"
+            "  slurm:\n"
+            "    account: myproj@cpu\n"
+            "    partition: prepost"
+        )
+    partition = cfg.slurm.get("partition", "prepost")
+    ntasks = cfg.slurm.get("ntasks", 1)
+    cpus_per_task = cfg.slurm.get("cpus_per_task", 4)
+
     job = (
         "#!/bin/bash\n"
         f"#SBATCH --job-name={rid[:40]}\n"
         f"#SBATCH --output={remote_run}/slurm-%j.out\n"
         f"#SBATCH --error={remote_run}/slurm-%j.err\n"
-        "#SBATCH --account=vpo@cpu\n"
-        "#SBATCH --partition=prepost\n"
+        f"#SBATCH --account={account}\n"
+        f"#SBATCH --partition={partition}\n"
         f"#SBATCH --time={time_limit}\n"
-        "#SBATCH --ntasks=1\n"
-        "#SBATCH --cpus-per-task=4\n"
+        f"#SBATCH --ntasks={ntasks}\n"
+        f"#SBATCH --cpus-per-task={cpus_per_task}\n"
         "set -euo pipefail\n"
         f"{body}"
     )
@@ -392,7 +421,10 @@ def build_packet(cfg: Config, rid: str, workflow: str, case: str, repos: dict[st
 def upload_packet(cfg: Config, rid: str, packet: Path) -> None:
     remote_run = f"{cfg.remote_state_root}/runs/{rid}"
     ssh(cfg, f"mkdir -p {shell_quote(remote_run)}")
-    run(["rsync", "-az", f"{packet}/", f"{cfg.remote}:{remote_run}/"])
+    # -s (--secluded-args): send the remote path over the rsync protocol
+    # rather than letting a shell on the far side expand it. Without it a
+    # space in the path splits the argument and metacharacters are live.
+    run(["rsync", "-az", "-s", f"{packet}/", f"{cfg.remote}:{remote_run}/"])
 
 
 def base_receipt(cfg: Config, rid: str, workflow: str, case: str, repos: dict[str, str]) -> dict[str, Any]:
@@ -636,7 +668,7 @@ def cmd_sync_artifacts(args: argparse.Namespace) -> int:
     dest = project_path(cfg, cfg.artifact_sync.get(key, f"data/hpckit_{key}")) / args.run_id
     dest.mkdir(parents=True, exist_ok=True)
     src = receipt["remote_output_path"].rstrip("/") + "/"
-    cp = run(["rsync", "-az", f"{cfg.remote}:{src}", str(dest) + "/"], check=False)
+    cp = run(["rsync", "-az", "-s", f"{cfg.remote}:{src}", str(dest) + "/"], check=False)
     if cp.returncode != 0:
         if cp.stdout:
             print(cp.stdout, end="")

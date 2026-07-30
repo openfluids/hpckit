@@ -10,6 +10,15 @@ beads: .beads
 job_script: job.batch
 # Restart helper edited by sparse continuation (default shown).
 restart_helper: check_restart.py
+# Slurm directives for the generated job.sbatch. `account` is required and has
+# no default: it names an allocation on a specific machine, and there is no
+# value that would be right anywhere else. The rest fall back to the values
+# shown if omitted.
+slurm:
+  account: myproj@cpu
+  partition: prepost
+  ntasks: 1
+  cpus_per_task: 4
 tools:
   sigtool:
     repo_url: git@github.com:myorg/sigtool.git
