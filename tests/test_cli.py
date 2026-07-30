@@ -368,8 +368,10 @@ def test_build_packet_uses_slurm_settings_from_config(tmp_path, monkeypatch) -> 
     assert "#SBATCH --partition=compute" in sbatch
     assert "#SBATCH --ntasks=2" in sbatch
     assert "#SBATCH --cpus-per-task=8" in sbatch
-    assert "vpo@cpu" not in sbatch
-    assert "prepost" not in sbatch
+    # exactly one account directive, and it is the configured one — guards
+    # against a hardcoded default being emitted alongside it
+    assert sbatch.count("#SBATCH --account=") == 1
+    assert "prepost" not in sbatch  # the old hardcoded partition must not leak
 
 
 def test_build_packet_requires_a_slurm_account(tmp_path, monkeypatch) -> None:
