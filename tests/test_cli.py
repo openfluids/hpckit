@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import yaml
 
-from navette.cli import build_parser, case_slug, run_id, short_ref
+from hpckit.cli import build_parser, case_slug, run_id, short_ref
 
 # Shared job_types / tools used by packet and parser tests.
 DEMO_TOOLS = {
@@ -43,19 +43,19 @@ def _write_cfg(tmp_path, **extra) -> None:
         "project": "Demo",
         "remote": "mycluster",
         "work_root": "/work/demo",
-        "remote_state_root": "/work/demo/.navette",
+        "remote_state_root": "/work/demo/.hpckit",
         "job_script": "job.batch",
         "restart_helper": "check_restart.py",
         "tools": DEMO_TOOLS,
         "job_types": DEMO_JOB_TYPES,
-        "artifact_sync": {"receipts": "navette/receipts"},
+        "artifact_sync": {"receipts": "hpckit/receipts"},
     }
     data.update(extra)
-    (tmp_path / ".navette.yaml").write_text(yaml.safe_dump(data))
+    (tmp_path / ".hpckit.yaml").write_text(yaml.safe_dump(data))
 
 
 def _cfg(tmp_path, **kwargs):
-    import navette.cli as cli
+    import hpckit.cli as cli
 
     base = dict(
         root=tmp_path,
@@ -64,7 +64,7 @@ def _cfg(tmp_path, **kwargs):
         work_root="/work/demo",
         scratch_root=None,
         remote_repos_root="/work/demo/repos",
-        remote_state_root="/work/demo/.navette",
+        remote_state_root="/work/demo/.hpckit",
         ledger=tmp_path / "L",
         artifact_sync={},
         job_script="job.batch",
@@ -105,42 +105,42 @@ def test_init_requires_work_root(tmp_path, monkeypatch, capsys) -> None:
     # There is no portable default for a cluster's work filesystem, so init
     # must refuse rather than invent one.
     monkeypatch.chdir(tmp_path)
-    from navette.cli import main
+    from hpckit.cli import main
 
     rc = main(["init"])
     assert rc == 1
-    assert not (tmp_path / ".navette.yaml").exists()
+    assert not (tmp_path / ".hpckit.yaml").exists()
     assert "--work-root is required" in capsys.readouterr().err
 
 
 def test_init_writes_config_with_work_root(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    from navette.cli import main
+    from hpckit.cli import main
 
     rc = main(["init", "--work-root", "/scratch/proj"])
     assert rc == 0
-    cfg_path = tmp_path / ".navette.yaml"
+    cfg_path = tmp_path / ".hpckit.yaml"
     assert cfg_path.exists()
     data = yaml.safe_load(cfg_path.read_text())
     assert data["project"] == tmp_path.name
     assert data["remote"] == "mycluster"
     assert data["work_root"] == "/scratch/proj"
     assert data["remote_repos_root"] == "/scratch/proj/repos"
-    assert data["remote_state_root"] == "/scratch/proj/.navette"
-    assert data["artifact_sync"]["receipts"] == "navette/receipts"
+    assert data["remote_state_root"] == "/scratch/proj/.hpckit"
+    assert data["artifact_sync"]["receipts"] == "hpckit/receipts"
     assert data["job_script"] == "job.batch"
     assert data["restart_helper"] == "check_restart.py"
     assert data["tools"] == {}
     assert data["job_types"] == {}
-    assert (tmp_path / "navette" / "receipts").is_dir()
-    assert (tmp_path / ".navette").is_dir()
+    assert (tmp_path / "hpckit" / "receipts").is_dir()
+    assert (tmp_path / ".hpckit").is_dir()
 
 
 def test_init_refuses_overwrite_without_force(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    cfg_path = tmp_path / ".navette.yaml"
+    cfg_path = tmp_path / ".hpckit.yaml"
     cfg_path.write_text("project: sentinel\n")
-    from navette.cli import main
+    from hpckit.cli import main
 
     rc = main(["init"])
     assert rc != 0
@@ -149,9 +149,9 @@ def test_init_refuses_overwrite_without_force(tmp_path, monkeypatch) -> None:
 
 def test_init_force_overwrites(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    cfg_path = tmp_path / ".navette.yaml"
+    cfg_path = tmp_path / ".hpckit.yaml"
     cfg_path.write_text("project: garbage\n")
-    from navette.cli import main
+    from hpckit.cli import main
 
     rc = main(["init", "--force", "--work-root", "/scratch/proj"])
     assert rc == 0
@@ -168,7 +168,7 @@ def test_init_subcommand_in_parser() -> None:
 
 
 def test_load_config_anchors_project_paths_to_config_parent(tmp_path, monkeypatch) -> None:
-    from navette.cli import build_packet, load_config, local_receipt_dir
+    from hpckit.cli import build_packet, load_config, local_receipt_dir
 
     _write_cfg(tmp_path)
     subdir = tmp_path / "nested" / "dir"
@@ -177,16 +177,16 @@ def test_load_config_anchors_project_paths_to_config_parent(tmp_path, monkeypatc
 
     cfg = load_config()
     assert cfg.root == tmp_path
-    assert local_receipt_dir(cfg) == tmp_path / "navette" / "receipts"
+    assert local_receipt_dir(cfg) == tmp_path / "hpckit" / "receipts"
 
     packet = build_packet(cfg, "rid", "process", "case/1", {}, {})
-    assert packet == tmp_path / ".navette" / "runs" / "rid"
-    assert not (subdir / ".navette").exists()
+    assert packet == tmp_path / ".hpckit" / "runs" / "rid"
+    assert not (subdir / ".hpckit").exists()
 
 
 def test_publish_receipt_creates_temp_dir_from_fresh_project(tmp_path, monkeypatch) -> None:
     import subprocess
-    import navette.cli as cli
+    import hpckit.cli as cli
 
     _write_cfg(tmp_path)
     monkeypatch.chdir(tmp_path)
@@ -200,8 +200,8 @@ def test_publish_receipt_creates_temp_dir_from_fresh_project(tmp_path, monkeypat
     monkeypatch.setattr(cli, "run", fake_run)
     cli.publish_receipt(cfg, {"run_id": "rid", "status": "submitted"})
 
-    assert (tmp_path / ".navette" / "rid.receipt.json").exists()
-    assert (tmp_path / "navette" / "receipts" / "rid.json").exists()
+    assert (tmp_path / ".hpckit" / "rid.receipt.json").exists()
+    assert (tmp_path / "hpckit" / "receipts" / "rid.json").exists()
     assert calls and calls[0][0] == "scp"
 
 
@@ -218,7 +218,7 @@ def test_submit_sparse_dry_run_skips_mutation_and_sbatch(monkeypatch, tmp_path) 
     assert no sbatch / write-back text leaks into a dry-run probe.
     """
     import subprocess
-    import navette.cli as cli
+    import hpckit.cli as cli
 
     cfg = _cfg(tmp_path)
     captured = {}
@@ -228,7 +228,7 @@ def test_submit_sparse_dry_run_skips_mutation_and_sbatch(monkeypatch, tmp_path) 
         return subprocess.CompletedProcess(
             ["ssh"],
             0,
-            "NAVETTE_PROBE 10000 1000 5600 check_restart.py.preXXX_TS\n",
+            "HPCKIT_PROBE 10000 1000 5600 check_restart.py.preXXX_TS\n",
             "",
         )
 
@@ -238,7 +238,7 @@ def test_submit_sparse_dry_run_skips_mutation_and_sbatch(monkeypatch, tmp_path) 
     assert cli.submit_sparse(cfg, args) == 0
     sent = captured["script"]
     assert "old_target=" in sent
-    assert "NAVETTE_PROBE" in sent
+    assert "HPCKIT_PROBE" in sent
     assert "cp check_restart.py" not in sent
     assert "sbatch job.batch" not in sent
     assert "p.write_text(s)" not in sent
@@ -249,7 +249,7 @@ def test_submit_sparse_dry_run_skips_mutation_and_sbatch(monkeypatch, tmp_path) 
 
 def test_submit_sparse_requires_job_script(monkeypatch, tmp_path) -> None:
     import pytest
-    import navette.cli as cli
+    import hpckit.cli as cli
 
     cfg = _cfg(tmp_path, job_script=None)
     args = build_parser().parse_args(["submit", "sparse", "cube_7/282", "--to", "5500", "--dry-run"])
@@ -263,7 +263,7 @@ def test_probe_par_endtime_regex_is_case_insensitive(monkeypatch, tmp_path) -> N
     """
     import re
     import inspect
-    import navette.cli as cli
+    import hpckit.cli as cli
 
     pattern = re.compile(r"endTime\s*=\s*([0-9.eE+-]+)", re.IGNORECASE)
     assert pattern.search("endTime = 14400.0") is not None
@@ -282,7 +282,7 @@ def test_submit_sparse_dry_run_handles_empty_par_end(monkeypatch, tmp_path) -> N
     'expected 5, got 4'.
     """
     import subprocess
-    import navette.cli as cli
+    import hpckit.cli as cli
 
     cfg = _cfg(tmp_path)
 
@@ -290,7 +290,7 @@ def test_submit_sparse_dry_run_handles_empty_par_end(monkeypatch, tmp_path) -> N
         return subprocess.CompletedProcess(
             ["ssh"],
             0,
-            "NAVETTE_PROBE 5000 1000 - check_restart.py.pre5000_TS\n",
+            "HPCKIT_PROBE 5000 1000 - check_restart.py.pre5000_TS\n",
             "",
         )
 
@@ -301,9 +301,9 @@ def test_submit_sparse_dry_run_handles_empty_par_end(monkeypatch, tmp_path) -> N
 
 def test_submit_sparse_uses_python_boolean_literals(monkeypatch, tmp_path) -> None:
     import subprocess
-    import navette.cli as cli
+    import hpckit.cli as cli
 
-    cfg = _cfg(tmp_path, ledger=tmp_path / "NAVETTE_RUN_LOG.md")
+    cfg = _cfg(tmp_path, ledger=tmp_path / "HPCKIT_RUN_LOG.md")
     captured = {}
 
     def fake_ssh(_cfg, script, *, check=True):
@@ -321,7 +321,7 @@ def test_submit_sparse_uses_python_boolean_literals(monkeypatch, tmp_path) -> No
 
 
 def test_build_packet_process_emits_sbatch_calling_venv(tmp_path, monkeypatch) -> None:
-    import navette.cli as cli
+    import hpckit.cli as cli
 
     _write_cfg(tmp_path)
     monkeypatch.chdir(tmp_path)
@@ -334,8 +334,8 @@ def test_build_packet_process_emits_sbatch_calling_venv(tmp_path, monkeypatch) -
     assert "#SBATCH --partition=prepost" in sbatch
     assert "/work/demo/.venv/bin/python" in sbatch
     assert "sigtool.cli process" in sbatch
-    assert "/work/demo/.navette/runs/rid42/registry.toml" in sbatch
-    assert "/work/demo/.navette/outputs/processed/rid42" in sbatch
+    assert "/work/demo/.hpckit/runs/rid42/registry.toml" in sbatch
+    assert "/work/demo/.hpckit/outputs/processed/rid42" in sbatch
 
     registry = (packet / "registry.toml").read_text()
     assert "[defaults]" in registry
@@ -346,7 +346,7 @@ def test_build_packet_process_emits_sbatch_calling_venv(tmp_path, monkeypatch) -
 
 
 def test_build_packet_process_uses_user_registry(tmp_path, monkeypatch) -> None:
-    import navette.cli as cli
+    import hpckit.cli as cli
 
     _write_cfg(tmp_path)
     monkeypatch.chdir(tmp_path)
@@ -359,7 +359,7 @@ def test_build_packet_process_uses_user_registry(tmp_path, monkeypatch) -> None:
 
 
 def test_build_packet_render_emits_tool_call(tmp_path, monkeypatch) -> None:
-    import navette.cli as cli
+    import hpckit.cli as cli
 
     _write_cfg(tmp_path)
     monkeypatch.chdir(tmp_path)
@@ -372,11 +372,11 @@ def test_build_packet_render_emits_tool_call(tmp_path, monkeypatch) -> None:
     assert "render-many" in sbatch
     assert "--case-dir /work/demo/mycase/340" in sbatch
     assert "--pattern '*0.f0*'" in sbatch
-    assert "/work/demo/.navette/outputs/renders/rid" in sbatch
+    assert "/work/demo/.hpckit/outputs/renders/rid" in sbatch
 
 
 def test_build_packet_plot_emits_tool_call(tmp_path, monkeypatch) -> None:
-    import navette.cli as cli
+    import hpckit.cli as cli
 
     _write_cfg(tmp_path)
     monkeypatch.chdir(tmp_path)
@@ -386,7 +386,7 @@ def test_build_packet_plot_emits_tool_call(tmp_path, monkeypatch) -> None:
     assert "/work/demo/.venv/bin/python" in sbatch
     assert "sigtool.cli plot" in sbatch
     assert "--kind fig9" in sbatch
-    assert "/work/demo/.navette/outputs/figures/rid" in sbatch
+    assert "/work/demo/.hpckit/outputs/figures/rid" in sbatch
 
 
 def test_plot_subparser_accepts_kind(tmp_path, monkeypatch) -> None:
@@ -405,7 +405,7 @@ def test_ssh_lstrips_and_quotes_script(tmp_path, monkeypatch) -> None:
     bash -lc and the rest leak into the outer login shell.
     """
     import subprocess
-    import navette.cli as cli
+    import hpckit.cli as cli
 
     cfg = _cfg(tmp_path, project="x", work_root="/w", remote_repos_root="/r", remote_state_root="/s")
     captured = {}
@@ -467,7 +467,7 @@ def test_process_subparser_accepts_registry(tmp_path, monkeypatch) -> None:
 def test_sync_artifacts_fails_closed_when_rsync_fails(tmp_path, monkeypatch) -> None:
     import subprocess
     import pytest
-    import navette.cli as cli
+    import hpckit.cli as cli
 
     _write_cfg(
         tmp_path,
@@ -494,7 +494,7 @@ def test_sync_artifacts_fails_closed_when_rsync_fails(tmp_path, monkeypatch) -> 
 
 def test_update_repo_rejects_unknown_tool(tmp_path, monkeypatch) -> None:
     import pytest
-    import navette.cli as cli
+    import hpckit.cli as cli
 
     _write_cfg(tmp_path)
     monkeypatch.chdir(tmp_path)
@@ -505,7 +505,7 @@ def test_update_repo_rejects_unknown_tool(tmp_path, monkeypatch) -> None:
 
 def test_update_repo_requires_repo_url_in_config(tmp_path, monkeypatch) -> None:
     import pytest
-    import navette.cli as cli
+    import hpckit.cli as cli
 
     _write_cfg(tmp_path, tools={"orphan": {}})
     monkeypatch.chdir(tmp_path)
@@ -516,14 +516,14 @@ def test_update_repo_requires_repo_url_in_config(tmp_path, monkeypatch) -> None:
 
 def test_expand_command_rejects_unknown_placeholder() -> None:
     import pytest
-    import navette.cli as cli
+    import hpckit.cli as cli
 
     with pytest.raises(SystemExit, match="unknown placeholder"):
         cli.expand_command("{venv}/bin/x --out {missing}", {"venv": "/v"})
 
 
 def test_output_kind_from_job_type(tmp_path) -> None:
-    import navette.cli as cli
+    import hpckit.cli as cli
 
     cfg = _cfg(tmp_path)
     assert cli.output_kind(cfg, "render") == "renders"
@@ -533,7 +533,7 @@ def test_output_kind_from_job_type(tmp_path) -> None:
 
 
 def test_load_config_reads_tools_and_job_script(tmp_path, monkeypatch) -> None:
-    import navette.cli as cli
+    import hpckit.cli as cli
 
     _write_cfg(tmp_path)
     monkeypatch.chdir(tmp_path)

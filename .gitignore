@@ -2,11 +2,11 @@ __pycache__/
 *.py[cod]
 .venv/
 .env
-.navette/runs/
-.navette/*.receipt.json
-navette/receipts/
-data/navette_processed/
-plots/navette_renders/
+.hpckit/runs/
+.hpckit/*.receipt.json
+hpckit/receipts/
+data/hpckit_processed/
+plots/hpckit_renders/
 
 dist/
 *.egg-info/

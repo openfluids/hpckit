@@ -51,14 +51,14 @@ def run(cmd: list[str], *, check: bool = True, cwd: Path | None = None) -> subpr
 
 
 def try_load_config(start: Path | None = None) -> Config | None:
-    """Load config if .navette.yaml exists.
+    """Load config if .hpckit.yaml exists.
 
     Incomplete files (e.g. mid-init stubs without work_root) still load so the
     parser can start; load_config() rejects them for real commands.
     """
     root = start or Path.cwd()
     for path in [root, *root.parents]:
-        cfg_path = path / ".navette.yaml"
+        cfg_path = path / ".hpckit.yaml"
         if cfg_path.exists():
             data = yaml.safe_load(cfg_path.read_text()) or {}
             tools = data.get("tools") or {}
@@ -76,9 +76,9 @@ def try_load_config(start: Path | None = None) -> Config | None:
                 scratch_root=data.get("scratch_root"),
                 remote_repos_root=data.get("remote_repos_root", f"{work_root}/repos" if work_root else ""),
                 remote_state_root=data.get(
-                    "remote_state_root", f"{work_root}/.navette" if work_root else ""
+                    "remote_state_root", f"{work_root}/.hpckit" if work_root else ""
                 ),
-                ledger=path / data.get("ledger", "NAVETTE_RUN_LOG.md"),
+                ledger=path / data.get("ledger", "HPCKIT_RUN_LOG.md"),
                 artifact_sync=data.get("artifact_sync", {}),
                 job_script=data.get("job_script"),
                 restart_helper=data.get("restart_helper", DEFAULT_RESTART_HELPER),
@@ -91,9 +91,9 @@ def try_load_config(start: Path | None = None) -> Config | None:
 def load_config(start: Path | None = None) -> Config:
     cfg = try_load_config(start)
     if cfg is None:
-        raise SystemExit("missing .navette.yaml in cwd or parents")
+        raise SystemExit("missing .hpckit.yaml in cwd or parents")
     if not cfg.work_root:
-        raise SystemExit("work_root missing in .navette.yaml")
+        raise SystemExit("work_root missing in .hpckit.yaml")
     return cfg
 
 
@@ -131,7 +131,7 @@ def project_path(cfg: Config, path: str | Path) -> Path:
 
 
 def local_receipt_dir(cfg: Config) -> Path:
-    return project_path(cfg, cfg.artifact_sync.get("receipts", "navette/receipts"))
+    return project_path(cfg, cfg.artifact_sync.get("receipts", "hpckit/receipts"))
 
 
 def output_kind(cfg: Config, workflow: str) -> str:
@@ -167,7 +167,7 @@ def append_ledger(cfg: Config, line: str) -> None:
     cfg.ledger.parent.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now(dt.timezone.utc).isoformat()
     with cfg.ledger.open("a") as fh:
-        fh.write(f"\n## {stamp} navette\n\n{line}\n")
+        fh.write(f"\n## {stamp} hpckit\n\n{line}\n")
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -254,7 +254,7 @@ def cmd_update_repo(args: argparse.Namespace) -> int:
     tool_cfg = cfg.tools[args.tool]
     repo_url = args.repo_url or tool_cfg.get("repo_url")
     if not repo_url:
-        raise SystemExit(f"tools.{args.tool}.repo_url not configured in .navette.yaml")
+        raise SystemExit(f"tools.{args.tool}.repo_url not configured in .hpckit.yaml")
     tool = shell_quote(args.tool)
     ref = shell_quote(args.ref)
     repo_url_q = shell_quote(repo_url)
@@ -272,7 +272,7 @@ if test ! -d "$env"; then
   "$env/bin/python" -m pip install -U pip
   "$env/bin/python" -m pip install -e "$repo"
 fi
-ln -sfn ../../.navette/envs/{args.tool}-$sha "$repo/.venv"
+ln -sfn ../../.hpckit/envs/{args.tool}-$sha "$repo/.venv"
 printf '%s\\n' "$sha"
 """
     cp = ssh(cfg, script)
@@ -306,7 +306,7 @@ def _stage_registry(cfg: Config, root: Path, extra: dict[str, Any], case: str, *
 
 
 def build_packet(cfg: Config, rid: str, workflow: str, case: str, repos: dict[str, str], extra: dict[str, Any]) -> Path:
-    root = cfg.root / ".navette" / "runs" / rid
+    root = cfg.root / ".hpckit" / "runs" / rid
     root.mkdir(parents=True, exist_ok=True)
     run_yaml = {"run_id": rid, "project": cfg.project, "workflow": workflow, "case": case, "repos": repos, **extra}
     (root / "run.yaml").write_text(yaml.safe_dump(run_yaml, sort_keys=False))
@@ -369,7 +369,7 @@ def build_packet(cfg: Config, rid: str, workflow: str, case: str, repos: dict[st
             f'echo "DONE {workflow} {case} -> {remote_out}"\n'
         )
     else:
-        body = f"echo 'navette run {rid}'\necho 'workflow {workflow}'\necho 'case {case}'\n"
+        body = f"echo 'hpckit run {rid}'\necho 'workflow {workflow}'\necho 'case {case}'\n"
         time_limit = "00:30:00"
 
     job = (
@@ -413,7 +413,7 @@ def base_receipt(cfg: Config, rid: str, workflow: str, case: str, repos: dict[st
 
 def publish_receipt(cfg: Config, receipt: dict[str, Any]) -> None:
     write_local_receipt(cfg, receipt)
-    tmp = cfg.root / ".navette" / f"{receipt['run_id']}.receipt.json"
+    tmp = cfg.root / ".hpckit" / f"{receipt['run_id']}.receipt.json"
     tmp.parent.mkdir(parents=True, exist_ok=True)
     tmp.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     remote = f"{cfg.remote_state_root}/receipts/{receipt['run_id']}.json"
@@ -461,7 +461,7 @@ def cmd_submit(args: argparse.Namespace) -> int:
 
 def submit_sparse(cfg: Config, args: argparse.Namespace) -> int:
     if not cfg.job_script:
-        raise SystemExit("job_script not configured in .navette.yaml")
+        raise SystemExit("job_script not configured in .hpckit.yaml")
     job_script = cfg.job_script
     helper = cfg.restart_helper or DEFAULT_RESTART_HELPER
     case = args.case.strip("/")
@@ -530,14 +530,14 @@ PY
 would_backup="{helper}.pre${{old_target}}_{utc_now()}"
 # Emit '-' sentinel for empty par_end so the 5-field structure is preserved
 # even for at-target cases whose .par has no endTime line.
-printf 'NAVETTE_PROBE %s %s %s %s\\n' "$old_target" "$old_chunk" "${{par_end:--}}" "$would_backup"
+printf 'HPCKIT_PROBE %s %s %s %s\\n' "$old_target" "$old_chunk" "${{par_end:--}}" "$would_backup"
 """
 
     if dry_run:
         cp = ssh(cfg, probe)
-        parts = [ln for ln in cp.stdout.strip().splitlines() if ln.startswith("NAVETTE_PROBE ")]
+        parts = [ln for ln in cp.stdout.strip().splitlines() if ln.startswith("HPCKIT_PROBE ")]
         if not parts:
-            raise SystemExit(f"sparse dry-run probe returned no NAVETTE_PROBE line:\n{cp.stdout}\n{cp.stderr}")
+            raise SystemExit(f"sparse dry-run probe returned no HPCKIT_PROBE line:\n{cp.stdout}\n{cp.stderr}")
         _, old_target, old_chunk, par_end, would_backup = parts[-1].split(maxsplit=4)
         if par_end == "-":
             par_end = ""  # sentinel back to empty for downstream display
@@ -633,7 +633,7 @@ def cmd_sync_artifacts(args: argparse.Namespace) -> int:
     receipt = read_receipt(cfg, args.run_id)
     workflow = receipt["workflow"]
     key = output_kind(cfg, workflow)
-    dest = project_path(cfg, cfg.artifact_sync.get(key, f"data/navette_{key}")) / args.run_id
+    dest = project_path(cfg, cfg.artifact_sync.get(key, f"data/hpckit_{key}")) / args.run_id
     dest.mkdir(parents=True, exist_ok=True)
     src = receipt["remote_output_path"].rstrip("/") + "/"
     cp = run(["rsync", "-az", f"{cfg.remote}:{src}", str(dest) + "/"], check=False)
@@ -665,11 +665,11 @@ def cmd_init(args: argparse.Namespace) -> int:
     if not work_root:
         print(
             "--work-root is required: there is no portable default for a cluster's "
-            "work filesystem. Pass --work-root, or set work_root in .navette.yaml.",
+            "work filesystem. Pass --work-root, or set work_root in .hpckit.yaml.",
             file=sys.stderr,
         )
         return 1
-    cfg_path = Path(".navette.yaml")
+    cfg_path = Path(".hpckit.yaml")
     if cfg_path.exists() and not args.force:
         print(f"{cfg_path} already exists; use --force to overwrite", file=sys.stderr)
         return 1
@@ -679,26 +679,26 @@ def cmd_init(args: argparse.Namespace) -> int:
         "work_root": work_root,
         "scratch_root": scratch_root,
         "remote_repos_root": f"{work_root}/repos",
-        "remote_state_root": f"{work_root}/.navette",
-        "ledger": "NAVETTE_RUN_LOG.md",
+        "remote_state_root": f"{work_root}/.hpckit",
+        "ledger": "HPCKIT_RUN_LOG.md",
         "beads": ".beads",
         "job_script": "job.batch",
         "restart_helper": DEFAULT_RESTART_HELPER,
         "tools": {},
         "job_types": {},
         "artifact_sync": {
-            "processed": "data/navette_processed",
-            "renders": "plots/navette_renders",
-            "figures": "data/navette_figures",
+            "processed": "data/hpckit_processed",
+            "renders": "plots/hpckit_renders",
+            "figures": "data/hpckit_figures",
             "paper_figs": "paper/figs",
-            "receipts": "navette/receipts",
+            "receipts": "hpckit/receipts",
         },
     }
     cfg_path.write_text(yaml.safe_dump(data, sort_keys=False))
-    Path("navette/receipts").mkdir(parents=True, exist_ok=True)
-    Path(".navette").mkdir(parents=True, exist_ok=True)
+    Path("hpckit/receipts").mkdir(parents=True, exist_ok=True)
+    Path(".hpckit").mkdir(parents=True, exist_ok=True)
     print(str(cfg_path.resolve()))
-    print("Next: navette doctor")
+    print("Next: hpckit doctor")
     return 0
 
 
@@ -722,7 +722,7 @@ def build_parser(cfg: Config | None = None) -> argparse.ArgumentParser:
     if cfg is None:
         cfg = try_load_config()
 
-    p = argparse.ArgumentParser(prog="navette")
+    p = argparse.ArgumentParser(prog="hpckit")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("doctor").set_defaults(func=cmd_doctor)
     ini = sub.add_parser("init")
@@ -734,7 +734,7 @@ def build_parser(cfg: Config | None = None) -> argparse.ArgumentParser:
     ini.set_defaults(func=cmd_init)
     sub.add_parser("status").set_defaults(func=cmd_status)
     u = sub.add_parser("update-repo")
-    u.add_argument("tool", help="tool name from tools: in .navette.yaml")
+    u.add_argument("tool", help="tool name from tools: in .hpckit.yaml")
     u.add_argument("--ref", required=True)
     u.add_argument("--repo-url", help="override tools.<name>.repo_url")
     u.set_defaults(func=cmd_update_repo)

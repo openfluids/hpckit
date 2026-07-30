@@ -1,11 +1,11 @@
 # Packaging notes
 
-`navette` follows the current PyPA baseline for a small pure-Python CLI:
+`hpckit` follows the current PyPA baseline for a small pure-Python CLI:
 
-- package code lives under `src/navette/`;
+- package code lives under `src/hpckit/`;
 - metadata is centralized in `pyproject.toml`;
-- the public command is exposed through `[project.scripts]` as `navette`;
-- `python -m navette` is supported via `src/navette/__main__.py`;
+- the public command is exposed through `[project.scripts]` as `hpckit`;
+- `python -m hpckit` is supported via `src/hpckit/__main__.py`;
 - maintainer-only tooling uses `[dependency-groups]` instead of runtime extras;
 - repository metadata includes license, classifiers, and project URLs.
 

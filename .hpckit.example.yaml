@@ -3,10 +3,10 @@ remote: mycluster
 work_root: /path/to/work
 scratch_root: /path/to/scratch
 remote_repos_root: /path/to/work/repos
-remote_state_root: /path/to/work/.navette
-ledger: NAVETTE_RUN_LOG.md
+remote_state_root: /path/to/work/.hpckit
+ledger: HPCKIT_RUN_LOG.md
 beads: .beads
-# Required for `navette submit sparse`. Name of the case-local batch script.
+# Required for `hpckit submit sparse`. Name of the case-local batch script.
 job_script: job.batch
 # Restart helper edited by sparse continuation (default shown).
 restart_helper: check_restart.py
@@ -31,8 +31,8 @@ job_types:
     output_kind: figures
     time_limit: "00:30:00"
 artifact_sync:
-  processed: data/navette_processed
-  renders: plots/navette_renders
-  figures: data/navette_figures
+  processed: data/hpckit_processed
+  renders: plots/hpckit_renders
+  figures: data/hpckit_figures
   paper_figs: paper/figs
-  receipts: navette/receipts
+  receipts: hpckit/receipts
