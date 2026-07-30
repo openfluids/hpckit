@@ -1,3 +1,5 @@
+![hpckit banner](https://raw.githubusercontent.com/openfluids/hpckit/main/assets/readme-banner-v1.jpg)
+
 # hpckit
 
 `hpckit` is a small Python CLI for orchestrating Slurm cluster workflows from a
