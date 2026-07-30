@@ -8,22 +8,18 @@ import re
 import shlex
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-TOOLS = {"spipe", "neksnap", "dsgbr", "dynachaos"}
-WORKFLOWS = {"process", "render", "plot", "sparse", "dense"}
-# Where each workflow's output lands under $WORK/.jz-manager/outputs/.
-# Used by build_packet, base_receipt, and cmd_sync_artifacts to stay in sync.
-WORKFLOW_OUTPUT_KIND = {"render": "renders", "plot": "figures"}
+# Built-in workflows that are not defined under job_types: in config.
+# sparse is implemented in-code; dense is reserved.
+BUILTIN_WORKFLOWS = {"sparse", "dense"}
 DEFAULT_OUTPUT_KIND = "processed"
-
-
-def output_kind(workflow: str) -> str:
-    return WORKFLOW_OUTPUT_KIND.get(workflow, DEFAULT_OUTPUT_KIND)
+DEFAULT_RESTART_HELPER = "check_restart.py"
+THIRD_PARTY_IMPORTS = ("scipy", "numpy", "matplotlib", "pyvista", "pymech", "vtk")
 
 
 @dataclass
@@ -37,30 +33,68 @@ class Config:
     remote_state_root: str
     ledger: Path
     artifact_sync: dict[str, str]
+    job_script: str | None = None
+    restart_helper: str = DEFAULT_RESTART_HELPER
+    tools: dict[str, dict[str, Any]] = field(default_factory=dict)
+    job_types: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+class _FormatMap(dict):
+    """str.format_map helper that raises on unknown placeholders."""
+
+    def __missing__(self, key: str) -> str:
+        raise KeyError(f"unknown placeholder '{{{key}}}' in command template")
 
 
 def run(cmd: list[str], *, check: bool = True, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, cwd=cwd, check=check, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
-def load_config(start: Path | None = None) -> Config:
+def try_load_config(start: Path | None = None) -> Config | None:
+    """Load config if .navette.yaml exists.
+
+    Incomplete files (e.g. mid-init stubs without work_root) still load so the
+    parser can start; load_config() rejects them for real commands.
+    """
     root = start or Path.cwd()
     for path in [root, *root.parents]:
-        cfg_path = path / ".jz-manager.yaml"
+        cfg_path = path / ".navette.yaml"
         if cfg_path.exists():
             data = yaml.safe_load(cfg_path.read_text()) or {}
+            tools = data.get("tools") or {}
+            job_types = data.get("job_types") or {}
+            if not isinstance(tools, dict):
+                tools = {}
+            if not isinstance(job_types, dict):
+                job_types = {}
+            work_root = data.get("work_root") or ""
             return Config(
                 root=path,
                 project=data.get("project", path.name),
-                remote=data.get("remote", "jz"),
-                work_root=data["work_root"],
+                remote=data.get("remote", "mycluster"),
+                work_root=work_root,
                 scratch_root=data.get("scratch_root"),
-                remote_repos_root=data.get("remote_repos_root", f"{data['work_root']}/repos"),
-                remote_state_root=data.get("remote_state_root", f"{data['work_root']}/.jz-manager"),
-                ledger=path / data.get("ledger", "JZ_RUN_LOG.md"),
+                remote_repos_root=data.get("remote_repos_root", f"{work_root}/repos" if work_root else ""),
+                remote_state_root=data.get(
+                    "remote_state_root", f"{work_root}/.navette" if work_root else ""
+                ),
+                ledger=path / data.get("ledger", "NAVETTE_RUN_LOG.md"),
                 artifact_sync=data.get("artifact_sync", {}),
+                job_script=data.get("job_script"),
+                restart_helper=data.get("restart_helper", DEFAULT_RESTART_HELPER),
+                tools={str(k): (v if isinstance(v, dict) else {}) for k, v in tools.items()},
+                job_types={str(k): (v if isinstance(v, dict) else {}) for k, v in job_types.items()},
             )
-    raise SystemExit("missing .jz-manager.yaml in cwd or parents")
+    return None
+
+
+def load_config(start: Path | None = None) -> Config:
+    cfg = try_load_config(start)
+    if cfg is None:
+        raise SystemExit("missing .navette.yaml in cwd or parents")
+    if not cfg.work_root:
+        raise SystemExit("work_root missing in .navette.yaml")
+    return cfg
 
 
 def ssh(cfg: Config, script: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -97,7 +131,19 @@ def project_path(cfg: Config, path: str | Path) -> Path:
 
 
 def local_receipt_dir(cfg: Config) -> Path:
-    return project_path(cfg, cfg.artifact_sync.get("receipts", "jz_manager/receipts"))
+    return project_path(cfg, cfg.artifact_sync.get("receipts", "navette/receipts"))
+
+
+def output_kind(cfg: Config, workflow: str) -> str:
+    jt = cfg.job_types.get(workflow) or {}
+    return str(jt.get("output_kind", DEFAULT_OUTPUT_KIND))
+
+
+def expand_command(template: str, values: dict[str, str]) -> str:
+    try:
+        return template.format_map(_FormatMap(values))
+    except KeyError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def read_receipt(cfg: Config, rid: str) -> dict[str, Any]:
@@ -121,7 +167,7 @@ def append_ledger(cfg: Config, line: str) -> None:
     cfg.ledger.parent.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now(dt.timezone.utc).isoformat()
     with cfg.ledger.open("a") as fh:
-        fh.write(f"\n## {stamp} jzp\n\n{line}\n")
+        fh.write(f"\n## {stamp} navette\n\n{line}\n")
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -131,13 +177,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     local = run(["ssh", "-G", cfg.remote], check=False)
     print(f"ssh_config: {'ok' if local.returncode == 0 else 'failed'}")
     venv = f"{cfg.work_root}/.venv"
-    script = f"""
-set -e
-printf 'work_root: '; test -d {shell_quote(cfg.work_root)} && echo ok || echo missing
-printf 'remote_state_root: '; mkdir -p {shell_quote(cfg.remote_state_root)}/{{runs,outputs/processed,outputs/renders,receipts}} && echo ok
-printf 'remote_repos_root: '; mkdir -p {shell_quote(cfg.remote_repos_root)} && echo ok
-printf 'slurm: '; command -v sbatch >/dev/null && command -v squeue >/dev/null && echo ok || echo missing
-for t in spipe neksnap nekStab; do
+    tool_names = sorted(cfg.tools)
+    if tool_names:
+        repo_loop = " ".join(shell_quote(t) for t in tool_names)
+        repo_block = f"""
+for t in {repo_loop}; do
   if test -d {shell_quote(cfg.remote_repos_root)}/$t/.git; then
     sha=$(git -C {shell_quote(cfg.remote_repos_root)}/$t rev-parse --short HEAD 2>/dev/null || true)
     echo "repo.$t: $sha"
@@ -145,16 +189,36 @@ for t in spipe neksnap nekStab; do
     echo "repo.$t: missing"
   fi
 done
-if test -d {shell_quote(venv)}; then
-  pyver=$({shell_quote(venv)}/bin/python --version 2>&1)
-  echo "shared_venv: ok ($pyver)"
-  for mod in spipe neksnap dsgbr dynachaos scipy numpy matplotlib pyvista pymech vtk; do
+"""
+    else:
+        repo_block = "echo 'no tools configured'\n"
+
+    import_mods = list(tool_names) + list(THIRD_PARTY_IMPORTS)
+    if import_mods:
+        mod_loop = " ".join(shell_quote(m) for m in import_mods)
+        import_block = f"""
+  for mod in {mod_loop}; do
     if {shell_quote(venv)}/bin/python -c "import $mod" 2>/dev/null; then
       echo "  import.$mod: ok"
     else
       echo "  import.$mod: missing"
     fi
   done
+"""
+    else:
+        import_block = "  echo '  no tools configured'\n"
+
+    script = f"""
+set -e
+printf 'work_root: '; test -d {shell_quote(cfg.work_root)} && echo ok || echo missing
+printf 'remote_state_root: '; mkdir -p {shell_quote(cfg.remote_state_root)}/{{runs,outputs/processed,outputs/renders,receipts}} && echo ok
+printf 'remote_repos_root: '; mkdir -p {shell_quote(cfg.remote_repos_root)} && echo ok
+printf 'slurm: '; command -v sbatch >/dev/null && command -v squeue >/dev/null && echo ok || echo missing
+{repo_block}
+if test -d {shell_quote(venv)}; then
+  pyver=$({shell_quote(venv)}/bin/python --version 2>&1)
+  echo "shared_venv: ok ($pyver)"
+{import_block}
   command -v ffmpeg >/dev/null && echo "  bin.ffmpeg: ok" || echo "  bin.ffmpeg: missing"
 else
   echo "shared_venv: missing (expected at {venv})"
@@ -184,9 +248,13 @@ ls -1t {shell_quote(cfg.remote_state_root)}/receipts/*.json 2>/dev/null | head -
 
 def cmd_update_repo(args: argparse.Namespace) -> int:
     cfg = load_config()
-    if args.tool not in TOOLS:
-        raise SystemExit(f"unknown tool {args.tool}; expected one of {sorted(TOOLS)}")
-    repo_url = args.repo_url or f"git@github.com:ricardofrantz/{args.tool}.git"
+    if args.tool not in cfg.tools:
+        available = sorted(cfg.tools) or ["(none configured)"]
+        raise SystemExit(f"unknown tool {args.tool}; expected one of {available}")
+    tool_cfg = cfg.tools[args.tool]
+    repo_url = args.repo_url or tool_cfg.get("repo_url")
+    if not repo_url:
+        raise SystemExit(f"tools.{args.tool}.repo_url not configured in .navette.yaml")
     tool = shell_quote(args.tool)
     ref = shell_quote(args.ref)
     repo_url_q = shell_quote(repo_url)
@@ -204,8 +272,8 @@ if test ! -d "$env"; then
   "$env/bin/python" -m pip install -U pip
   "$env/bin/python" -m pip install -e "$repo"
 fi
-ln -sfn ../../.jz-manager/envs/{args.tool}-$sha "$repo/.venv"
-printf '%s\n' "$sha"
+ln -sfn ../../.navette/envs/{args.tool}-$sha "$repo/.venv"
+printf '%s\\n' "$sha"
 """
     cp = ssh(cfg, script)
     sha = cp.stdout.strip().splitlines()[-1]
@@ -224,68 +292,84 @@ def _minimal_registry_toml(work_root: str, case: str) -> str:
     )
 
 
+def _stage_registry(cfg: Config, root: Path, extra: dict[str, Any], case: str, *, required: bool) -> None:
+    registry_src = extra.get("registry")
+    if registry_src:
+        src = Path(registry_src).expanduser()
+        if not src.is_absolute():
+            src = (cfg.root / src).resolve()
+        if not src.exists():
+            raise SystemExit(f"--registry path not found: {src}")
+        (root / "registry.toml").write_text(src.read_text())
+    elif required:
+        (root / "registry.toml").write_text(_minimal_registry_toml(cfg.work_root, case))
+
+
 def build_packet(cfg: Config, rid: str, workflow: str, case: str, repos: dict[str, str], extra: dict[str, Any]) -> Path:
-    root = cfg.root / ".jz-manager" / "runs" / rid
+    root = cfg.root / ".navette" / "runs" / rid
     root.mkdir(parents=True, exist_ok=True)
     run_yaml = {"run_id": rid, "project": cfg.project, "workflow": workflow, "case": case, "repos": repos, **extra}
     (root / "run.yaml").write_text(yaml.safe_dump(run_yaml, sort_keys=False))
 
     remote_run = f"{cfg.remote_state_root}/runs/{rid}"
-    remote_out = f"{cfg.remote_state_root}/outputs/{output_kind(workflow)}/{rid}"
+    remote_out = f"{cfg.remote_state_root}/outputs/{output_kind(cfg, workflow)}/{rid}"
     venv = f"{cfg.work_root}/.venv"
+    case_dir = f"{cfg.work_root}/{case}"
+    pattern = extra.get("pattern", "*0.f0*")
+    kind = extra.get("kind") or case
 
-    if workflow == "process":
-        registry_src = extra.get("registry")
-        if registry_src:
-            src = Path(registry_src).expanduser()
-            if not src.is_absolute():
-                src = (cfg.root / src).resolve()
-            if not src.exists():
-                raise SystemExit(f"--registry path not found: {src}")
-            (root / "registry.toml").write_text(src.read_text())
-        else:
-            (root / "registry.toml").write_text(_minimal_registry_toml(cfg.work_root, case))
+    jt = cfg.job_types.get(workflow) or {}
+    template = jt.get("command")
+    time_limit = str(jt.get("time_limit", "00:30:00"))
+
+    if template:
+        # Stage registry when the template or extras reference one.
+        needs_registry = "registry" in template or bool(extra.get("registry"))
+        if needs_registry:
+            # Always write a registry when the command mentions it (generate minimal if omitted).
+            _stage_registry(cfg, root, extra, case, required="registry" in template)
+        elif extra.get("registry"):
+            _stage_registry(cfg, root, extra, case, required=False)
+
+        # Values are shell-quoted so path/glob tokens stay single shell words.
+        # Templates compose paths as {venv}/bin/...; quoting the whole path
+        # fragments would break that, so quote complete path placeholders only
+        # when they stand alone (case_dir, output_dir, pattern, kind, case).
+        # venv is left unquoted so "{venv}/bin/python" expands cleanly on HPC
+        # paths (no spaces). pattern/kind/case/case_dir/output_dir/run_dir are
+        # quoted via shell_quote.
+        values = {
+            "venv": venv,
+            "case": shell_quote(case),
+            "case_dir": shell_quote(case_dir),
+            "pattern": shell_quote(pattern),
+            "output_dir": shell_quote(remote_out),
+            "kind": shell_quote(kind),
+            "run_dir": shell_quote(remote_run),
+        }
+        # If the template already wraps {pattern} in quotes, double-quoting
+        # would break globs. Detect quoted placeholders and pass raw there.
+        if re.search(r"'\{pattern\}'|\"\{pattern\}\"", template):
+            values["pattern"] = pattern
+        if re.search(r"'\{kind\}'|\"\{kind\}\"", template):
+            values["kind"] = kind
+        if re.search(r"'\{case\}'|\"\{case\}\"", template):
+            values["case"] = case
+        if re.search(r"'\{case_dir\}'|\"\{case_dir\}\"", template):
+            values["case_dir"] = case_dir
+        if re.search(r"'\{output_dir\}'|\"\{output_dir\}\"", template):
+            values["output_dir"] = remote_out
+        if re.search(r"'\{run_dir\}'|\"\{run_dir\}\"", template):
+            values["run_dir"] = remote_run
+
+        cmd = expand_command(template, values)
         body = (
-            f'mkdir -p {shell_quote(remote_out)}\n'
-            f'{shell_quote(venv + "/bin/python")} -m spipe.cli process \\\n'
-            f'  --registry {shell_quote(remote_run + "/registry.toml")} \\\n'
-            f'  --output-root {shell_quote(remote_out)}\n'
-            f'echo "DONE process {case} -> {remote_out}"\n'
+            f"mkdir -p {shell_quote(remote_out)}\n"
+            f"{cmd}\n"
+            f'echo "DONE {workflow} {case} -> {remote_out}"\n'
         )
-        time_limit = "01:00:00"
-    elif workflow == "render":
-        pattern = extra.get("pattern", "*0.f0*")
-        body = (
-            f'mkdir -p {shell_quote(remote_out)}\n'
-            f'{shell_quote(venv + "/bin/neksnap")} render-many \\\n'
-            f'  --case-dir {shell_quote(cfg.work_root + "/" + case)} \\\n'
-            f'  --pattern {shell_quote(pattern)} \\\n'
-            f'  --out {shell_quote(remote_out)}\n'
-            f'echo "DONE render {case} -> {remote_out}"\n'
-        )
-        time_limit = "04:00:00"
-    elif workflow == "plot":
-        kind = extra.get("kind") or case
-        registry_arg = ""
-        registry_src = extra.get("registry")
-        if registry_src:
-            src = Path(registry_src).expanduser()
-            if not src.is_absolute():
-                src = (cfg.root / src).resolve()
-            if not src.exists():
-                raise SystemExit(f"--registry path not found: {src}")
-            (root / "registry.toml").write_text(src.read_text())
-            registry_arg = f' \\\n  --registry {shell_quote(remote_run + "/registry.toml")}'
-        body = (
-            f'mkdir -p {shell_quote(remote_out)}\n'
-            f'{shell_quote(venv + "/bin/python")} -m spipe.cli plot \\\n'
-            f'  --kind {shell_quote(kind)} \\\n'
-            f'  --output-root {shell_quote(remote_out)}{registry_arg}\n'
-            f'echo "DONE plot {kind} -> {remote_out}"\n'
-        )
-        time_limit = "00:30:00"
     else:
-        body = f"echo 'jzp run {rid}'\necho 'workflow {workflow}'\necho 'case {case}'\n"
+        body = f"echo 'navette run {rid}'\necho 'workflow {workflow}'\necho 'case {case}'\n"
         time_limit = "00:30:00"
 
     job = (
@@ -319,7 +403,7 @@ def base_receipt(cfg: Config, rid: str, workflow: str, case: str, repos: dict[st
         "case": case,
         "job_id": None,
         "remote_case_path": f"{cfg.work_root}/{case}",
-        "remote_output_path": f"{cfg.remote_state_root}/outputs/{output_kind(workflow)}/{rid}",
+        "remote_output_path": f"{cfg.remote_state_root}/outputs/{output_kind(cfg, workflow)}/{rid}",
         "repos": repos,
         "status": "prepared",
         "submitted_at": None,
@@ -329,7 +413,7 @@ def base_receipt(cfg: Config, rid: str, workflow: str, case: str, repos: dict[st
 
 def publish_receipt(cfg: Config, receipt: dict[str, Any]) -> None:
     write_local_receipt(cfg, receipt)
-    tmp = cfg.root / ".jz-manager" / f"{receipt['run_id']}.receipt.json"
+    tmp = cfg.root / ".navette" / f"{receipt['run_id']}.receipt.json"
     tmp.parent.mkdir(parents=True, exist_ok=True)
     tmp.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     remote = f"{cfg.remote_state_root}/receipts/{receipt['run_id']}.json"
@@ -340,13 +424,19 @@ def cmd_submit(args: argparse.Namespace) -> int:
     cfg = load_config()
     if args.workflow == "sparse":
         return submit_sparse(cfg, args)
-    # For `submit plot <kind>` the positional is named `kind`; mirror it onto
-    # `case` so the run_id / receipt path is uniform across workflows.
-    if args.workflow == "plot" and not getattr(args, "case", None):
+    # For job types whose positional is `kind`, mirror it onto `case` so the
+    # run_id / receipt path is uniform across workflows.
+    if not getattr(args, "case", None) and getattr(args, "kind", None):
         args.case = args.kind
-    ref = getattr(args, "spipe_ref", None) or getattr(args, "neksnap_ref", None) or "unknown"
+    jt = cfg.job_types.get(args.workflow)
+    if jt is None:
+        raise SystemExit(
+            f"unknown job type {args.workflow}; expected one of {sorted(cfg.job_types) or ['(none configured)']}"
+        )
+    tool = jt.get("tool")
+    ref = getattr(args, "ref", None) or "unknown"
     rid = run_id(args.workflow, args.case, ref)
-    repos = {"spipe": getattr(args, "spipe_ref", None), "neksnap": getattr(args, "neksnap_ref", None)}
+    repos: dict[str, str] = {tool: ref} if tool else {}
     extra: dict[str, Any] = {}
     if getattr(args, "registry", None):
         extra["registry"] = args.registry
@@ -370,6 +460,10 @@ def cmd_submit(args: argparse.Namespace) -> int:
 
 
 def submit_sparse(cfg: Config, args: argparse.Namespace) -> int:
+    if not cfg.job_script:
+        raise SystemExit("job_script not configured in .navette.yaml")
+    job_script = cfg.job_script
+    helper = cfg.restart_helper or DEFAULT_RESTART_HELPER
     case = args.case.strip("/")
     dom = hashlib.sha1(f"{case}:{args.to}:{args.chunk}".encode()).hexdigest()[:7]
     rid = run_id("sparse", case, dom)
@@ -377,35 +471,42 @@ def submit_sparse(cfg: Config, args: argparse.Namespace) -> int:
     chunk_line = "" if args.chunk is None else f"new_chunk={float(args.chunk)}"
     dry_run = bool(getattr(args, "dry_run", False))
 
-    # Probe-only half: parses helper constants, validates jz.pbs + .par, prints
+    helper_q = shell_quote(helper)
+    job_script_q = shell_quote(job_script)
+    # Unquoted names for pathlib inside remote Python (names are config-controlled).
+    helper_py = helper.replace("\\", "\\\\").replace("'", "\\'")
+    job_script_py = job_script.replace("\\", "\\\\").replace("'", "\\'")
+    helper_call = f"python3 {helper} >> nextlog"
+
+    # Probe-only half: parses helper constants, validates job script + .par, prints
     # a SENTINEL line on success. No file is mutated. Used by --dry-run, then
     # repeated as the first step of the real submit.
     probe = f"""
 set -euo pipefail
 case_dir={shell_quote(cfg.work_root + '/' + case)}
 cd "$case_dir"
-test -f check_restart.py || {{ echo 'missing check_restart.py' >&2; exit 2; }}
-test -f jz.pbs || {{ echo 'missing jz.pbs' >&2; exit 2; }}
+test -f {helper_q} || {{ echo 'missing {helper}' >&2; exit 2; }}
+test -f {job_script_q} || {{ echo 'missing {job_script}' >&2; exit 2; }}
 old_target=$(python3 - <<'PY'
 import re, pathlib
-s=pathlib.Path('check_restart.py').read_text()
+s=pathlib.Path('{helper_py}').read_text()
 m=re.search(r'^target_end_time\\s*=\\s*([0-9.eE+-]+)', s, re.M)
 print(m.group(1) if m else '')
 PY
 )
 old_chunk=$(python3 - <<'PY'
 import re, pathlib
-s=pathlib.Path('check_restart.py').read_text()
+s=pathlib.Path('{helper_py}').read_text()
 m=re.search(r'^single_job_time\\s*=\\s*([0-9.eE+-]+)', s, re.M)
 print(m.group(1) if m else '')
 PY
 )
-test -n "$old_target" && test -n "$old_chunk" || {{ echo 'cannot parse check_restart.py constants' >&2; exit 3; }}
+test -n "$old_target" && test -n "$old_chunk" || {{ echo 'cannot parse {helper} constants' >&2; exit 3; }}
 python3 - <<'PY'
 import pathlib, sys
-text=pathlib.Path('jz.pbs').read_text()
-if 'python3 check_restart.py >> nextlog' not in text:
-    sys.exit('jz.pbs does not call python3 check_restart.py >> nextlog')
+text=pathlib.Path('{job_script_py}').read_text()
+if '{helper_call}' not in text:
+    sys.exit('{job_script} does not call {helper_call}')
 PY
 par_end=$(python3 - <<'PY'
 import pathlib,re
@@ -426,17 +527,17 @@ if par:
     if pe > old_target + 1e-9 and not force:
         raise SystemExit(f'.par endTime {{pe}} is past helper target {{old_target}}; use --force-reconcile')
 PY
-would_backup="check_restart.py.pre${{old_target}}_{utc_now()}"
+would_backup="{helper}.pre${{old_target}}_{utc_now()}"
 # Emit '-' sentinel for empty par_end so the 5-field structure is preserved
 # even for at-target cases whose .par has no endTime line.
-printf 'JZP_PROBE %s %s %s %s\\n' "$old_target" "$old_chunk" "${{par_end:--}}" "$would_backup"
+printf 'NAVETTE_PROBE %s %s %s %s\\n' "$old_target" "$old_chunk" "${{par_end:--}}" "$would_backup"
 """
 
     if dry_run:
         cp = ssh(cfg, probe)
-        parts = [ln for ln in cp.stdout.strip().splitlines() if ln.startswith("JZP_PROBE ")]
+        parts = [ln for ln in cp.stdout.strip().splitlines() if ln.startswith("NAVETTE_PROBE ")]
         if not parts:
-            raise SystemExit(f"sparse dry-run probe returned no JZP_PROBE line:\n{cp.stdout}\n{cp.stderr}")
+            raise SystemExit(f"sparse dry-run probe returned no NAVETTE_PROBE line:\n{cp.stdout}\n{cp.stderr}")
         _, old_target, old_chunk, par_end, would_backup = parts[-1].split(maxsplit=4)
         if par_end == "-":
             par_end = ""  # sentinel back to empty for downstream display
@@ -449,18 +550,18 @@ printf 'JZP_PROBE %s %s %s %s\\n' "$old_target" "$old_chunk" "${{par_end:--}}" "
             f"  would set target_end_time = {float(args.to)}\n"
             f"  would set single_job_time = {new_chunk}\n"
             f"  would back up to         = {would_backup}\n"
-            f"  would sbatch jz.pbs      (skipped in dry-run)"
+            f"  would sbatch {job_script}  (skipped in dry-run)"
         )
         return 0
 
     # Real submit: probe (with same sentinel), then mutate + sbatch.
     mutate = f"""
 {probe}
-backup="check_restart.py.pre${{old_target}}_{utc_now()}"
-cp check_restart.py "$backup"
+backup="{helper}.pre${{old_target}}_{utc_now()}"
+cp {helper_q} "$backup"
 python3 - <<PY
 import pathlib,re
-p=pathlib.Path('check_restart.py')
+p=pathlib.Path('{helper_py}')
 s=p.read_text()
 s=re.sub(r'^target_end_time\\s*=\\s*[0-9.eE+-]+', 'target_end_time = {float(args.to)}', s, count=1, flags=re.M)
 {chunk_line}
@@ -468,15 +569,29 @@ if {args.chunk is not None}:
     s=re.sub(r'^single_job_time\\s*=\\s*[0-9.eE+-]+', f'single_job_time = {{new_chunk}}', s, count=1, flags=re.M)
 p.write_text(s)
 PY
-job=$(sbatch jz.pbs | awk '{{print $NF}}')
+job=$(sbatch {job_script_q} | awk '{{print $NF}}')
 printf '%s %s %s %s\\n' "$job" "$backup" "$old_target" "$old_chunk"
 """
     cp = ssh(cfg, mutate)
     job, backup, old_target, old_chunk = cp.stdout.strip().split()[-4:]
     receipt = base_receipt(cfg, rid, "sparse", case, {})
-    receipt.update({"job_id": job, "status": "submitted", "submitted_at": dt.datetime.now(dt.timezone.utc).isoformat(), "target_end_time": float(args.to), "single_job_time": float(args.chunk) if args.chunk else None, "backup_file": backup, "previous_target_end_time": old_target, "previous_single_job_time": old_chunk})
+    receipt.update(
+        {
+            "job_id": job,
+            "status": "submitted",
+            "submitted_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "target_end_time": float(args.to),
+            "single_job_time": float(args.chunk) if args.chunk else None,
+            "backup_file": backup,
+            "previous_target_end_time": old_target,
+            "previous_single_job_time": old_chunk,
+        }
+    )
     publish_receipt(cfg, receipt)
-    append_ledger(cfg, f"- submitted sparse continuation `{rid}` for `{case}` to {args.to}; first job `{job}`; backup `{backup}`")
+    append_ledger(
+        cfg,
+        f"- submitted sparse continuation `{rid}` for `{case}` to {args.to}; first job `{job}`; backup `{backup}`",
+    )
     print(rid)
     return 0
 
@@ -487,11 +602,26 @@ def cmd_poll(args: argparse.Namespace) -> int:
         receipt = read_receipt(cfg, args.run_id)
         job = receipt.get("job_id")
         if job:
-            cp = ssh(cfg, f"sacct -j {shell_quote(str(job))} --format=JobID,State,Elapsed,ExitCode -P 2>/dev/null || squeue -j {shell_quote(str(job))}", check=False)
+            cp = ssh(
+                cfg,
+                f"sacct -j {shell_quote(str(job))} --format=JobID,State,Elapsed,ExitCode -P 2>/dev/null || squeue -j {shell_quote(str(job))}",
+                check=False,
+            )
             print(cp.stdout, end="")
         if receipt.get("workflow") == "sparse":
             case = receipt["case"]
-            script = f"cd {shell_quote(cfg.work_root + '/' + case)} && python3 - <<'PY'\nimport pathlib,re,glob,os\ns=pathlib.Path('check_restart.py').read_text()\nfor k in ['target_end_time','single_job_time']:\n m=re.search(r'^'+k+r'\\s*=\\s*([0-9.eE+-]+)', s, re.M); print(k + ': ' + (m.group(1) if m else '?'))\nfs=sorted(glob.glob('*0.f0*'), key=os.path.getmtime)\nprint('latest_field: '+(fs[-1] if fs else 'none'))\nPY"
+            helper = cfg.restart_helper or DEFAULT_RESTART_HELPER
+            helper_py = helper.replace("\\", "\\\\").replace("'", "\\'")
+            script = (
+                f"cd {shell_quote(cfg.work_root + '/' + case)} && python3 - <<'PY'\n"
+                f"import pathlib,re,glob,os\n"
+                f"s=pathlib.Path('{helper_py}').read_text()\n"
+                f"for k in ['target_end_time','single_job_time']:\n"
+                f" m=re.search(r'^'+k+r'\\s*=\\s*([0-9.eE+-]+)', s, re.M); print(k + ': ' + (m.group(1) if m else '?'))\n"
+                f"fs=sorted(glob.glob('*0.f0*'), key=os.path.getmtime)\n"
+                f"print('latest_field: '+(fs[-1] if fs else 'none'))\n"
+                f"PY"
+            )
             print(ssh(cfg, script, check=False).stdout, end="")
     else:
         return cmd_status(args)
@@ -502,8 +632,8 @@ def cmd_sync_artifacts(args: argparse.Namespace) -> int:
     cfg = load_config()
     receipt = read_receipt(cfg, args.run_id)
     workflow = receipt["workflow"]
-    key = output_kind(workflow)
-    dest = project_path(cfg, cfg.artifact_sync.get(key, f"data/jz_{key}")) / args.run_id
+    key = output_kind(cfg, workflow)
+    dest = project_path(cfg, cfg.artifact_sync.get(key, f"data/navette_{key}")) / args.run_id
     dest.mkdir(parents=True, exist_ok=True)
     src = receipt["remote_output_path"].rstrip("/") + "/"
     cp = run(["rsync", "-az", f"{cfg.remote}:{src}", str(dest) + "/"], check=False)
@@ -532,7 +662,14 @@ def cmd_init(args: argparse.Namespace) -> int:
     remote = args.remote
     work_root = args.work_root
     scratch_root = args.scratch_root
-    cfg_path = Path(".jz-manager.yaml")
+    if not work_root:
+        print(
+            "--work-root is required: there is no portable default for a cluster's "
+            "work filesystem. Pass --work-root, or set work_root in .navette.yaml.",
+            file=sys.stderr,
+        )
+        return 1
+    cfg_path = Path(".navette.yaml")
     if cfg_path.exists() and not args.force:
         print(f"{cfg_path} already exists; use --force to overwrite", file=sys.stderr)
         return 1
@@ -542,74 +679,86 @@ def cmd_init(args: argparse.Namespace) -> int:
         "work_root": work_root,
         "scratch_root": scratch_root,
         "remote_repos_root": f"{work_root}/repos",
-        "remote_state_root": f"{work_root}/.jz-manager",
-        "ledger": "JZ_RUN_LOG.md",
+        "remote_state_root": f"{work_root}/.navette",
+        "ledger": "NAVETTE_RUN_LOG.md",
         "beads": ".beads",
+        "job_script": "job.batch",
+        "restart_helper": DEFAULT_RESTART_HELPER,
+        "tools": {},
+        "job_types": {},
         "artifact_sync": {
-            "processed": "data/jz_processed",
-            "renders": "plots/jz_renders",
-            "figures": "data/jz_figures",
+            "processed": "data/navette_processed",
+            "renders": "plots/navette_renders",
+            "figures": "data/navette_figures",
             "paper_figs": "paper/figs",
-            "receipts": "jz_manager/receipts",
+            "receipts": "navette/receipts",
         },
     }
     cfg_path.write_text(yaml.safe_dump(data, sort_keys=False))
-    Path("jz_manager/receipts").mkdir(parents=True, exist_ok=True)
-    Path(".jz-manager").mkdir(parents=True, exist_ok=True)
+    Path("navette/receipts").mkdir(parents=True, exist_ok=True)
+    Path(".navette").mkdir(parents=True, exist_ok=True)
     print(str(cfg_path.resolve()))
-    print("Next: jzp doctor")
+    print("Next: navette doctor")
     return 0
 
 
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="jzp")
+def _add_job_type_parser(ss: argparse._SubParsersAction, name: str, jt: dict[str, Any]) -> None:
+    cmd = str(jt.get("command") or "")
+    p = ss.add_parser(name)
+    if "{kind}" in cmd:
+        p.add_argument("kind", help="figure / plot kind name")
+    else:
+        p.add_argument("case")
+    if jt.get("tool"):
+        p.add_argument("--ref", required=True, help="git ref of the tool used by this job type")
+    if "{pattern}" in cmd:
+        p.add_argument("--pattern", default="*0.f0*", help="snapshot glob inside the case dir")
+    p.add_argument("--registry", help="path to a registry.toml; minimal one generated if required and omitted")
+    p.add_argument("--manual", action="store_true")
+    p.set_defaults(func=cmd_submit, workflow=name)
+
+
+def build_parser(cfg: Config | None = None) -> argparse.ArgumentParser:
+    if cfg is None:
+        cfg = try_load_config()
+
+    p = argparse.ArgumentParser(prog="navette")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("doctor").set_defaults(func=cmd_doctor)
     ini = sub.add_parser("init")
     ini.add_argument("--project")
-    ini.add_argument("--remote", default="jz")
-    ini.add_argument("--work-root", default="/path/to/work")
-    ini.add_argument("--scratch-root", default="/path/to/scratch")
+    ini.add_argument("--remote", default="mycluster")
+    ini.add_argument("--work-root", default=None)
+    ini.add_argument("--scratch-root", default=None)
     ini.add_argument("--force", action="store_true")
     ini.set_defaults(func=cmd_init)
     sub.add_parser("status").set_defaults(func=cmd_status)
     u = sub.add_parser("update-repo")
-    u.add_argument("tool", choices=sorted(TOOLS))
+    u.add_argument("tool", help="tool name from tools: in .navette.yaml")
     u.add_argument("--ref", required=True)
-    u.add_argument("--repo-url")
+    u.add_argument("--repo-url", help="override tools.<name>.repo_url")
     u.set_defaults(func=cmd_update_repo)
 
     s = sub.add_parser("submit")
     ss = s.add_subparsers(dest="workflow", required=True)
 
-    pr = ss.add_parser("process")
-    pr.add_argument("case")
-    pr.add_argument("--spipe-ref", required=True)
-    pr.add_argument("--registry", help="path to a spipe registry.toml; minimal one generated if omitted")
-    pr.add_argument("--manual", action="store_true")
-    pr.set_defaults(func=cmd_submit)
-
-    rr = ss.add_parser("render")
-    rr.add_argument("case")
-    rr.add_argument("--neksnap-ref", required=True)
-    rr.add_argument("--pattern", default="*0.f0*", help="snapshot glob inside the case dir")
-    rr.add_argument("--manual", action="store_true")
-    rr.set_defaults(func=cmd_submit)
-
-    pl = ss.add_parser("plot", help="render a spipe.figures paper figure on JZ")
-    pl.add_argument("kind", help="figure name (must match spipe.figures registry, e.g. fig9)")
-    pl.add_argument("--spipe-ref", required=True)
-    pl.add_argument("--registry", help="optional registry.toml supplied by the cockpit")
-    pl.add_argument("--manual", action="store_true")
-    pl.set_defaults(func=cmd_submit)
+    if cfg is not None:
+        for name, jt in cfg.job_types.items():
+            if name in BUILTIN_WORKFLOWS:
+                continue
+            _add_job_type_parser(ss, name, jt if isinstance(jt, dict) else {})
 
     sp = ss.add_parser("sparse")
     sp.add_argument("case")
-    sp.add_argument("--dry-run", action="store_true", help="probe + report; do not mutate check_restart.py or sbatch")
+    sp.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="probe + report; do not mutate restart helper or sbatch",
+    )
     sp.add_argument("--to", required=True, type=float)
     sp.add_argument("--chunk", type=float)
     sp.add_argument("--force-reconcile", action="store_true")
-    sp.set_defaults(func=cmd_submit)
+    sp.set_defaults(func=cmd_submit, workflow="sparse")
 
     po = sub.add_parser("poll")
     po.add_argument("run_id", nargs="?")

@@ -1,0 +1,38 @@
+project: myproject
+remote: mycluster
+work_root: /path/to/work
+scratch_root: /path/to/scratch
+remote_repos_root: /path/to/work/repos
+remote_state_root: /path/to/work/.navette
+ledger: NAVETTE_RUN_LOG.md
+beads: .beads
+# Required for `navette submit sparse`. Name of the case-local batch script.
+job_script: job.batch
+# Restart helper edited by sparse continuation (default shown).
+restart_helper: check_restart.py
+tools:
+  sigtool:
+    repo_url: git@github.com:myorg/sigtool.git
+  snaptool:
+    repo_url: git@github.com:myorg/snaptool.git
+job_types:
+  process:
+    tool: sigtool
+    command: "{venv}/bin/python -m sigtool.cli process --registry {run_dir}/registry.toml --output-root {output_dir}"
+    time_limit: "01:00:00"
+  render:
+    tool: snaptool
+    command: "{venv}/bin/snaptool render-many --case-dir {case_dir} --pattern '{pattern}' --out {output_dir}"
+    output_kind: renders
+    time_limit: "04:00:00"
+  plot:
+    tool: sigtool
+    command: "{venv}/bin/python -m sigtool.cli plot --kind {kind} --output-root {output_dir}"
+    output_kind: figures
+    time_limit: "00:30:00"
+artifact_sync:
+  processed: data/navette_processed
+  renders: plots/navette_renders
+  figures: data/navette_figures
+  paper_figs: paper/figs
+  receipts: navette/receipts

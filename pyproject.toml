@@ -3,11 +3,11 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "jz-pilot"
+name = "navette"
 version = "0.1.0"
 description = "Jean Zay orchestration CLI for SSH, Slurm run packets, receipts, and artifact sync."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [
@@ -22,7 +22,6 @@ classifiers = [
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
@@ -36,12 +35,12 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ricardofrantz/jz_pilot"
-Repository = "https://github.com/ricardofrantz/jz_pilot"
-Issues = "https://github.com/ricardofrantz/jz_pilot/issues"
+Homepage = "https://github.com/openfluids/navette"
+Repository = "https://github.com/openfluids/navette"
+Issues = "https://github.com/openfluids/navette/issues"
 
 [project.scripts]
-jzp = "jz_pilot.cli:main"
+navette = "navette.cli:main"
 
 [dependency-groups]
 dev = [
@@ -51,7 +50,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/jz_pilot"]
+packages = ["src/navette"]
 
 [tool.ruff]
 line-length = 100

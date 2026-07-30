@@ -2,7 +2,78 @@ from __future__ import annotations
 
 import yaml
 
-from jz_pilot.cli import build_parser, case_slug, run_id, short_ref
+from navette.cli import build_parser, case_slug, run_id, short_ref
+
+# Shared job_types / tools used by packet and parser tests.
+DEMO_TOOLS = {
+    "sigtool": {"repo_url": "git@github.com:myorg/sigtool.git"},
+    "snaptool": {"repo_url": "git@github.com:myorg/snaptool.git"},
+}
+DEMO_JOB_TYPES = {
+    "process": {
+        "tool": "sigtool",
+        "command": (
+            "{venv}/bin/python -m sigtool.cli process "
+            "--registry {run_dir}/registry.toml --output-root {output_dir}"
+        ),
+        "time_limit": "01:00:00",
+    },
+    "render": {
+        "tool": "snaptool",
+        "command": (
+            "{venv}/bin/snaptool render-many --case-dir {case_dir} "
+            "--pattern '{pattern}' --out {output_dir}"
+        ),
+        "output_kind": "renders",
+        "time_limit": "04:00:00",
+    },
+    "plot": {
+        "tool": "sigtool",
+        "command": (
+            "{venv}/bin/python -m sigtool.cli plot --kind {kind} --output-root {output_dir}"
+        ),
+        "output_kind": "figures",
+        "time_limit": "00:30:00",
+    },
+}
+
+
+def _write_cfg(tmp_path, **extra) -> None:
+    data = {
+        "project": "Demo",
+        "remote": "mycluster",
+        "work_root": "/work/demo",
+        "remote_state_root": "/work/demo/.navette",
+        "job_script": "job.batch",
+        "restart_helper": "check_restart.py",
+        "tools": DEMO_TOOLS,
+        "job_types": DEMO_JOB_TYPES,
+        "artifact_sync": {"receipts": "navette/receipts"},
+    }
+    data.update(extra)
+    (tmp_path / ".navette.yaml").write_text(yaml.safe_dump(data))
+
+
+def _cfg(tmp_path, **kwargs):
+    import navette.cli as cli
+
+    base = dict(
+        root=tmp_path,
+        project="Demo",
+        remote="mycluster",
+        work_root="/work/demo",
+        scratch_root=None,
+        remote_repos_root="/work/demo/repos",
+        remote_state_root="/work/demo/.navette",
+        ledger=tmp_path / "L",
+        artifact_sync={},
+        job_script="job.batch",
+        restart_helper="check_restart.py",
+        tools=DEMO_TOOLS,
+        job_types=DEMO_JOB_TYPES,
+    )
+    base.update(kwargs)
+    return cli.Config(**base)
 
 
 def test_case_slug_replaces_slashes() -> None:
@@ -19,36 +90,58 @@ def test_run_id_shape() -> None:
     assert rid.endswith("-process-mycase_340-abcdef1")
 
 
-def test_parser_has_expected_commands() -> None:
+def test_parser_has_expected_commands(tmp_path, monkeypatch) -> None:
+    _write_cfg(tmp_path)
+    monkeypatch.chdir(tmp_path)
     parser = build_parser()
-    args = parser.parse_args(["submit", "process", "mycase/340", "--spipe-ref", "abcdef1", "--manual"])
+    args = parser.parse_args(["submit", "process", "mycase/340", "--ref", "abcdef1", "--manual"])
     assert args.workflow == "process"
     assert args.case == "mycase/340"
-    assert args.spipe_ref == "abcdef1"
+    assert args.ref == "abcdef1"
     assert args.manual is True
 
 
-def test_init_writes_config_with_defaults(tmp_path, monkeypatch) -> None:
+def test_init_requires_work_root(tmp_path, monkeypatch, capsys) -> None:
+    # There is no portable default for a cluster's work filesystem, so init
+    # must refuse rather than invent one.
     monkeypatch.chdir(tmp_path)
-    from jz_pilot.cli import main
+    from navette.cli import main
+
     rc = main(["init"])
+    assert rc == 1
+    assert not (tmp_path / ".navette.yaml").exists()
+    assert "--work-root is required" in capsys.readouterr().err
+
+
+def test_init_writes_config_with_work_root(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    from navette.cli import main
+
+    rc = main(["init", "--work-root", "/scratch/proj"])
     assert rc == 0
-    cfg_path = tmp_path / ".jz-manager.yaml"
+    cfg_path = tmp_path / ".navette.yaml"
     assert cfg_path.exists()
     data = yaml.safe_load(cfg_path.read_text())
     assert data["project"] == tmp_path.name
-    assert data["remote"] == "jz"
-    assert data["work_root"].startswith("/path/to/work")
-    assert data["artifact_sync"]["receipts"] == "jz_manager/receipts"
-    assert (tmp_path / "jz_manager" / "receipts").is_dir()
-    assert (tmp_path / ".jz-manager").is_dir()
+    assert data["remote"] == "mycluster"
+    assert data["work_root"] == "/scratch/proj"
+    assert data["remote_repos_root"] == "/scratch/proj/repos"
+    assert data["remote_state_root"] == "/scratch/proj/.navette"
+    assert data["artifact_sync"]["receipts"] == "navette/receipts"
+    assert data["job_script"] == "job.batch"
+    assert data["restart_helper"] == "check_restart.py"
+    assert data["tools"] == {}
+    assert data["job_types"] == {}
+    assert (tmp_path / "navette" / "receipts").is_dir()
+    assert (tmp_path / ".navette").is_dir()
 
 
 def test_init_refuses_overwrite_without_force(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    cfg_path = tmp_path / ".jz-manager.yaml"
+    cfg_path = tmp_path / ".navette.yaml"
     cfg_path.write_text("project: sentinel\n")
-    from jz_pilot.cli import main
+    from navette.cli import main
+
     rc = main(["init"])
     assert rc != 0
     assert cfg_path.read_text() == "project: sentinel\n"
@@ -56,18 +149,18 @@ def test_init_refuses_overwrite_without_force(tmp_path, monkeypatch) -> None:
 
 def test_init_force_overwrites(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    cfg_path = tmp_path / ".jz-manager.yaml"
+    cfg_path = tmp_path / ".navette.yaml"
     cfg_path.write_text("project: garbage\n")
-    from jz_pilot.cli import main
-    rc = main(["init", "--force"])
+    from navette.cli import main
+
+    rc = main(["init", "--force", "--work-root", "/scratch/proj"])
     assert rc == 0
     data = yaml.safe_load(cfg_path.read_text())
     assert data["project"] == tmp_path.name
-    assert "work_root" in data
+    assert data["work_root"] == "/scratch/proj"
 
 
 def test_init_subcommand_in_parser() -> None:
-    from jz_pilot.cli import build_parser
     parser = build_parser()
     args = parser.parse_args(["init", "--project", "myproject", "--force"])
     assert args.project == "myproject"
@@ -75,47 +168,27 @@ def test_init_subcommand_in_parser() -> None:
 
 
 def test_load_config_anchors_project_paths_to_config_parent(tmp_path, monkeypatch) -> None:
-    from jz_pilot.cli import build_packet, load_config, local_receipt_dir
+    from navette.cli import build_packet, load_config, local_receipt_dir
 
-    cfg_path = tmp_path / ".jz-manager.yaml"
-    cfg_path.write_text(
-        yaml.safe_dump(
-            {
-                "project": "Demo",
-                "remote": "jz",
-                "work_root": "/work/demo",
-                "artifact_sync": {"receipts": "jz_manager/receipts"},
-            }
-        )
-    )
+    _write_cfg(tmp_path)
     subdir = tmp_path / "nested" / "dir"
     subdir.mkdir(parents=True)
     monkeypatch.chdir(subdir)
 
     cfg = load_config()
     assert cfg.root == tmp_path
-    assert local_receipt_dir(cfg) == tmp_path / "jz_manager" / "receipts"
+    assert local_receipt_dir(cfg) == tmp_path / "navette" / "receipts"
 
     packet = build_packet(cfg, "rid", "process", "case/1", {}, {})
-    assert packet == tmp_path / ".jz-manager" / "runs" / "rid"
-    assert not (subdir / ".jz-manager").exists()
+    assert packet == tmp_path / ".navette" / "runs" / "rid"
+    assert not (subdir / ".navette").exists()
 
 
 def test_publish_receipt_creates_temp_dir_from_fresh_project(tmp_path, monkeypatch) -> None:
     import subprocess
-    import jz_pilot.cli as cli
+    import navette.cli as cli
 
-    cfg_path = tmp_path / ".jz-manager.yaml"
-    cfg_path.write_text(
-        yaml.safe_dump(
-            {
-                "project": "Demo",
-                "remote": "jz",
-                "work_root": "/work/demo",
-                "remote_state_root": "/work/demo/.jz-manager",
-            }
-        )
-    )
+    _write_cfg(tmp_path)
     monkeypatch.chdir(tmp_path)
     cfg = cli.load_config()
     calls = []
@@ -127,8 +200,8 @@ def test_publish_receipt_creates_temp_dir_from_fresh_project(tmp_path, monkeypat
     monkeypatch.setattr(cli, "run", fake_run)
     cli.publish_receipt(cfg, {"run_id": "rid", "status": "submitted"})
 
-    assert (tmp_path / ".jz-manager" / "rid.receipt.json").exists()
-    assert (tmp_path / "jz_manager" / "receipts" / "rid.json").exists()
+    assert (tmp_path / ".navette" / "rid.receipt.json").exists()
+    assert (tmp_path / "navette" / "receipts" / "rid.json").exists()
     assert calls and calls[0][0] == "scp"
 
 
@@ -140,27 +213,22 @@ def test_sparse_subparser_accepts_dry_run() -> None:
 
 
 def test_submit_sparse_dry_run_skips_mutation_and_sbatch(monkeypatch, tmp_path) -> None:
-    """Dry-run sparse must not mutate check_restart.py or call sbatch — only
+    """Dry-run sparse must not mutate the restart helper or call sbatch — only
     parse and report. The fake ssh records the script it received so we can
-    assert no sbatch / sed-replace text leaks into a dry-run probe.
+    assert no sbatch / write-back text leaks into a dry-run probe.
     """
     import subprocess
-    import jz_pilot.cli as cli
+    import navette.cli as cli
 
-    cfg = cli.Config(
-        root=tmp_path, project="Demo", remote="jz", work_root="/work/demo",
-        scratch_root=None, remote_repos_root="/work/demo/repos",
-        remote_state_root="/work/demo/.jz-manager", ledger=tmp_path / "L",
-        artifact_sync={},
-    )
+    cfg = _cfg(tmp_path)
     captured = {}
 
     def fake_ssh(_cfg, script, *, check=True):
         captured["script"] = script
-        # Simulate the probe printing the JZP_PROBE sentinel line
         return subprocess.CompletedProcess(
-            ["ssh"], 0,
-            "JZP_PROBE 10000 1000 5600 check_restart.py.preXXX_TS\n",
+            ["ssh"],
+            0,
+            "NAVETTE_PROBE 10000 1000 5600 check_restart.py.preXXX_TS\n",
             "",
         )
 
@@ -169,65 +237,60 @@ def test_submit_sparse_dry_run_skips_mutation_and_sbatch(monkeypatch, tmp_path) 
     args = build_parser().parse_args(["submit", "sparse", "cube_7/282", "--to", "5500", "--dry-run"])
     assert cli.submit_sparse(cfg, args) == 0
     sent = captured["script"]
-    # Dry-run script should contain probes...
     assert "old_target=" in sent
-    assert "JZP_PROBE" in sent
-    # ...but NEVER the mutation step or sbatch
+    assert "NAVETTE_PROBE" in sent
     assert "cp check_restart.py" not in sent
-    assert "sbatch jz.pbs" not in sent
+    assert "sbatch job.batch" not in sent
     assert "p.write_text(s)" not in sent
+    # Config-driven names appear in the probe.
+    assert "job.batch" in sent
+    assert "check_restart.py" in sent
+
+
+def test_submit_sparse_requires_job_script(monkeypatch, tmp_path) -> None:
+    import pytest
+    import navette.cli as cli
+
+    cfg = _cfg(tmp_path, job_script=None)
+    args = build_parser().parse_args(["submit", "sparse", "cube_7/282", "--to", "5500", "--dry-run"])
+    with pytest.raises(SystemExit, match="job_script not configured"):
+        cli.submit_sparse(cfg, args)
 
 
 def test_probe_par_endtime_regex_is_case_insensitive(monkeypatch, tmp_path) -> None:
     """Legacy .par files use lowercase 'endtime = 15000.0'; newer cases use
-    camelCase 'endTime = 14400.0'. The probe regex must match both. Regression
-    for jfm_cs-10j (sphere_5/345 dry-run showed '(none found)' for par_end
-    because the file had lowercase 'endtime').
+    camelCase 'endTime = 14400.0'. The probe regex must match both.
     """
     import re
+    import inspect
+    import navette.cli as cli
 
-    # Locate the probe regex literal in the cli source. It's inside a
-    # heredoc/probe string. We assert the IGNORECASE flag is wired up by
-    # invoking the same regex pattern against both casings.
-    pattern = re.compile(r'endTime\s*=\s*([0-9.eE+-]+)', re.IGNORECASE)
+    pattern = re.compile(r"endTime\s*=\s*([0-9.eE+-]+)", re.IGNORECASE)
     assert pattern.search("endTime = 14400.0") is not None
     assert pattern.search("endtime = 15000.0") is not None
     assert pattern.search("EndTime = 9999.9") is not None
-    # Sanity: still rejects non-matches
     assert pattern.search("endTimes = 1.0") is None or pattern.search("endTimes = 1.0").group(1) == "1.0"
-    # Source-level assertion: cli.py probe carries IGNORECASE flag.
-    import jz_pilot.cli as cli
-    import inspect
     src = inspect.getsource(cli)
-    # Both the regex literal and the re.IGNORECASE flag must appear in the
-    # probe area. If someone refactors the probe to drop IGNORECASE, this
-    # test catches it.
     assert "endTime" in src and "re.IGNORECASE" in src, (
         "probe regex must use re.IGNORECASE to handle lowercase 'endtime' .par"
     )
 
 
 def test_submit_sparse_dry_run_handles_empty_par_end(monkeypatch, tmp_path) -> None:
-    """At-target cases (sphere_5/450) have no `endTime` line in .par, so the
-    probe emits `-` as the par_end sentinel. The parser must accept this
-    without raising 'expected 5, got 4'. Regression test for the bug found
-    during jfm_cs-11r pilot migration on 2026-05-19.
+    """At-target cases have no `endTime` line in .par, so the probe emits `-`
+    as the par_end sentinel. The parser must accept this without raising
+    'expected 5, got 4'.
     """
     import subprocess
-    import jz_pilot.cli as cli
+    import navette.cli as cli
 
-    cfg = cli.Config(
-        root=tmp_path, project="Demo", remote="jz", work_root="/work/demo",
-        scratch_root=None, remote_repos_root="/work/demo/repos",
-        remote_state_root="/work/demo/.jz-manager", ledger=tmp_path / "L",
-        artifact_sync={},
-    )
+    cfg = _cfg(tmp_path)
 
     def fake_ssh(_cfg, _script, *, check=True):
-        # Probe with `-` sentinel for empty par_end (.par has no endTime line)
         return subprocess.CompletedProcess(
-            ["ssh"], 0,
-            "JZP_PROBE 5000 1000 - check_restart.py.pre5000_TS\n",
+            ["ssh"],
+            0,
+            "NAVETTE_PROBE 5000 1000 - check_restart.py.pre5000_TS\n",
             "",
         )
 
@@ -238,19 +301,9 @@ def test_submit_sparse_dry_run_handles_empty_par_end(monkeypatch, tmp_path) -> N
 
 def test_submit_sparse_uses_python_boolean_literals(monkeypatch, tmp_path) -> None:
     import subprocess
-    import jz_pilot.cli as cli
+    import navette.cli as cli
 
-    cfg = cli.Config(
-        root=tmp_path,
-        project="Demo",
-        remote="jz",
-        work_root="/work/demo",
-        scratch_root=None,
-        remote_repos_root="/work/demo/repos",
-        remote_state_root="/work/demo/.jz-manager",
-        ledger=tmp_path / "JZ_RUN_LOG.md",
-        artifact_sync={},
-    )
+    cfg = _cfg(tmp_path, ledger=tmp_path / "NAVETTE_RUN_LOG.md")
     captured = {}
 
     def fake_ssh(_cfg, script, *, check=True):
@@ -264,50 +317,38 @@ def test_submit_sparse_uses_python_boolean_literals(monkeypatch, tmp_path) -> No
     assert cli.submit_sparse(cfg, args) == 0
     assert "force=True" in captured["script"].replace(" ", "")
     assert "force=true" not in captured["script"]
+    assert "sbatch job.batch" in captured["script"] or "sbatch 'job.batch'" in captured["script"]
 
 
 def test_build_packet_process_emits_sbatch_calling_venv(tmp_path, monkeypatch) -> None:
-    import jz_pilot.cli as cli
-    cfg_path = tmp_path / ".jz-manager.yaml"
-    cfg_path.write_text(
-        yaml.safe_dump(
-            {
-                "project": "Demo",
-                "remote": "jz",
-                "work_root": "/work/demo",
-                "remote_state_root": "/work/demo/.jz-manager",
-            }
-        )
-    )
+    import navette.cli as cli
+
+    _write_cfg(tmp_path)
     monkeypatch.chdir(tmp_path)
     cfg = cli.load_config()
-    packet = cli.build_packet(cfg, "rid42", "process", "mycase/340", {"spipe": "abc1234"}, {})
+    packet = cli.build_packet(cfg, "rid42", "process", "mycase/340", {"sigtool": "abc1234"}, {})
 
     sbatch = (packet / "job.sbatch").read_text()
     assert "#SBATCH --job-name=rid42" in sbatch
     assert "#SBATCH --account=vpo@cpu" in sbatch
     assert "#SBATCH --partition=prepost" in sbatch
     assert "/work/demo/.venv/bin/python" in sbatch
-    assert "spipe.cli process" in sbatch
-    assert "/work/demo/.jz-manager/runs/rid42/registry.toml" in sbatch
-    assert "/work/demo/.jz-manager/outputs/processed/rid42" in sbatch
+    assert "sigtool.cli process" in sbatch
+    assert "/work/demo/.navette/runs/rid42/registry.toml" in sbatch
+    assert "/work/demo/.navette/outputs/processed/rid42" in sbatch
 
     registry = (packet / "registry.toml").read_text()
-    assert '[defaults]' in registry
+    assert "[defaults]" in registry
     assert 'input_root = "/work/demo"' in registry
-    assert '[cases.mycase_340]' in registry
+    assert "[cases.mycase_340]" in registry
     assert 'input_path = "mycase/340"' in registry
     assert 'signal_files = ["lift_drag.all"]' in registry
 
 
 def test_build_packet_process_uses_user_registry(tmp_path, monkeypatch) -> None:
-    import jz_pilot.cli as cli
-    cfg_path = tmp_path / ".jz-manager.yaml"
-    cfg_path.write_text(
-        yaml.safe_dump(
-            {"project": "Demo", "remote": "jz", "work_root": "/work/demo"}
-        )
-    )
+    import navette.cli as cli
+
+    _write_cfg(tmp_path)
     monkeypatch.chdir(tmp_path)
     user_reg = tmp_path / "custom_registry.toml"
     user_reg.write_text('[cases.custom]\ninput_path = "custom/path"\n')
@@ -317,59 +358,45 @@ def test_build_packet_process_uses_user_registry(tmp_path, monkeypatch) -> None:
     assert (packet / "registry.toml").read_text() == user_reg.read_text()
 
 
-def test_build_packet_render_emits_neksnap_call(tmp_path, monkeypatch) -> None:
-    import jz_pilot.cli as cli
-    cfg_path = tmp_path / ".jz-manager.yaml"
-    cfg_path.write_text(
-        yaml.safe_dump(
-            {
-                "project": "Demo",
-                "remote": "jz",
-                "work_root": "/work/demo",
-                "remote_state_root": "/work/demo/.jz-manager",
-            }
-        )
-    )
+def test_build_packet_render_emits_tool_call(tmp_path, monkeypatch) -> None:
+    import navette.cli as cli
+
+    _write_cfg(tmp_path)
     monkeypatch.chdir(tmp_path)
     cfg = cli.load_config()
-    packet = cli.build_packet(cfg, "rid", "render", "mycase/340", {"neksnap": "abc"}, {"pattern": "*0.f0*"})
+    packet = cli.build_packet(
+        cfg, "rid", "render", "mycase/340", {"snaptool": "abc"}, {"pattern": "*0.f0*"}
+    )
     sbatch = (packet / "job.sbatch").read_text()
-    assert "/work/demo/.venv/bin/neksnap" in sbatch
+    assert "/work/demo/.venv/bin/snaptool" in sbatch
     assert "render-many" in sbatch
     assert "--case-dir /work/demo/mycase/340" in sbatch
-    assert "--pattern '*0.f0*'" in sbatch  # asterisks force shlex.quote to wrap in single quotes
-    assert "/work/demo/.jz-manager/outputs/renders/rid" in sbatch
+    assert "--pattern '*0.f0*'" in sbatch
+    assert "/work/demo/.navette/outputs/renders/rid" in sbatch
 
 
-def test_build_packet_plot_emits_spipe_call(tmp_path, monkeypatch) -> None:
-    import jz_pilot.cli as cli
-    cfg_path = tmp_path / ".jz-manager.yaml"
-    cfg_path.write_text(
-        yaml.safe_dump(
-            {
-                "project": "Demo",
-                "remote": "jz",
-                "work_root": "/work/demo",
-                "remote_state_root": "/work/demo/.jz-manager",
-            }
-        )
-    )
+def test_build_packet_plot_emits_tool_call(tmp_path, monkeypatch) -> None:
+    import navette.cli as cli
+
+    _write_cfg(tmp_path)
     monkeypatch.chdir(tmp_path)
     cfg = cli.load_config()
-    packet = cli.build_packet(cfg, "rid", "plot", "fig9", {"spipe": "abc"}, {"kind": "fig9"})
+    packet = cli.build_packet(cfg, "rid", "plot", "fig9", {"sigtool": "abc"}, {"kind": "fig9"})
     sbatch = (packet / "job.sbatch").read_text()
     assert "/work/demo/.venv/bin/python" in sbatch
-    assert "spipe.cli plot" in sbatch
+    assert "sigtool.cli plot" in sbatch
     assert "--kind fig9" in sbatch
-    assert "/work/demo/.jz-manager/outputs/figures/rid" in sbatch
+    assert "/work/demo/.navette/outputs/figures/rid" in sbatch
 
 
-def test_plot_subparser_accepts_kind() -> None:
+def test_plot_subparser_accepts_kind(tmp_path, monkeypatch) -> None:
+    _write_cfg(tmp_path)
+    monkeypatch.chdir(tmp_path)
     parser = build_parser()
-    args = parser.parse_args(["submit", "plot", "fig9", "--spipe-ref", "abc", "--manual"])
+    args = parser.parse_args(["submit", "plot", "fig9", "--ref", "abc", "--manual"])
     assert args.workflow == "plot"
     assert args.kind == "fig9"
-    assert args.spipe_ref == "abc"
+    assert args.ref == "abc"
 
 
 def test_ssh_lstrips_and_quotes_script(tmp_path, monkeypatch) -> None:
@@ -378,12 +405,9 @@ def test_ssh_lstrips_and_quotes_script(tmp_path, monkeypatch) -> None:
     bash -lc and the rest leak into the outer login shell.
     """
     import subprocess
-    import jz_pilot.cli as cli
-    cfg = cli.Config(
-        root=tmp_path, project="x", remote="jz", work_root="/w", scratch_root=None,
-        remote_repos_root="/r", remote_state_root="/s", ledger=tmp_path / "L",
-        artifact_sync={},
-    )
+    import navette.cli as cli
+
+    cfg = _cfg(tmp_path, project="x", work_root="/w", remote_repos_root="/r", remote_state_root="/s")
     captured = {}
 
     def fake_run(cmd, *, check=True, cwd=None):
@@ -393,57 +417,61 @@ def test_ssh_lstrips_and_quotes_script(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(cli, "run", fake_run)
     cli.ssh(cfg, "\n\n  set -e\nmkdir -p /tmp/X && echo done\n")
 
-    # cmd is exactly: ['ssh', 'jz', "bash -lc '<quoted script>'"]
-    assert captured["cmd"][:2] == ["ssh", "jz"], captured["cmd"]
+    assert captured["cmd"][:2] == ["ssh", "mycluster"], captured["cmd"]
     remote = captured["cmd"][2]
     assert remote.startswith("bash -lc "), remote
-    # The leading whitespace/newlines must be stripped
-    assert "lstrip" not in remote  # sanity: nothing weird in the string
+    assert "lstrip" not in remote
     assert remote.startswith("bash -lc 'set -e")
-    # The whole script must be inside a single quoted blob
     assert remote.endswith("'") and remote.count("'") >= 2
-    # The script body must survive intact (mkdir command not split)
     assert "mkdir -p /tmp/X && echo done" in remote
 
 
-def test_render_subparser_accepts_pattern() -> None:
+def test_render_subparser_accepts_pattern(tmp_path, monkeypatch) -> None:
+    _write_cfg(tmp_path)
+    monkeypatch.chdir(tmp_path)
     parser = build_parser()
-    args = parser.parse_args([
-        "submit", "render", "mycase/340",
-        "--neksnap-ref", "abc",
-        "--pattern", "sphere0.f000*",
-        "--manual",
-    ])
+    args = parser.parse_args(
+        [
+            "submit",
+            "render",
+            "mycase/340",
+            "--ref",
+            "abc",
+            "--pattern",
+            "sphere0.f000*",
+            "--manual",
+        ]
+    )
     assert args.pattern == "sphere0.f000*"
 
 
-def test_process_subparser_accepts_registry() -> None:
+def test_process_subparser_accepts_registry(tmp_path, monkeypatch) -> None:
+    _write_cfg(tmp_path)
+    monkeypatch.chdir(tmp_path)
     parser = build_parser()
-    args = parser.parse_args([
-        "submit", "process", "mycase/340",
-        "--spipe-ref", "abc",
-        "--registry", "case_registries/sphere.toml",
-        "--manual",
-    ])
+    args = parser.parse_args(
+        [
+            "submit",
+            "process",
+            "mycase/340",
+            "--ref",
+            "abc",
+            "--registry",
+            "case_registries/sphere.toml",
+            "--manual",
+        ]
+    )
     assert args.registry == "case_registries/sphere.toml"
 
 
 def test_sync_artifacts_fails_closed_when_rsync_fails(tmp_path, monkeypatch) -> None:
     import subprocess
     import pytest
-    import jz_pilot.cli as cli
+    import navette.cli as cli
 
-    cfg_path = tmp_path / ".jz-manager.yaml"
-    cfg_path.write_text(
-        yaml.safe_dump(
-            {
-                "project": "Demo",
-                "remote": "jz",
-                "work_root": "/work/demo",
-                "remote_state_root": "/work/demo/.jz-manager",
-                "artifact_sync": {"processed": "data/processed", "receipts": "receipts"},
-            }
-        )
+    _write_cfg(
+        tmp_path,
+        artifact_sync={"processed": "data/processed", "receipts": "receipts"},
     )
     receipt_dir = tmp_path / "receipts"
     receipt_dir.mkdir()
@@ -462,3 +490,55 @@ def test_sync_artifacts_fails_closed_when_rsync_fails(tmp_path, monkeypatch) -> 
 
     data = yaml.safe_load(receipt_dir.joinpath("rid.json").read_text())
     assert data["status"] == "submitted"
+
+
+def test_update_repo_rejects_unknown_tool(tmp_path, monkeypatch) -> None:
+    import pytest
+    import navette.cli as cli
+
+    _write_cfg(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    args = build_parser().parse_args(["update-repo", "not_a_tool", "--ref", "main"])
+    with pytest.raises(SystemExit, match="unknown tool"):
+        cli.cmd_update_repo(args)
+
+
+def test_update_repo_requires_repo_url_in_config(tmp_path, monkeypatch) -> None:
+    import pytest
+    import navette.cli as cli
+
+    _write_cfg(tmp_path, tools={"orphan": {}})
+    monkeypatch.chdir(tmp_path)
+    args = build_parser().parse_args(["update-repo", "orphan", "--ref", "main"])
+    with pytest.raises(SystemExit, match="tools.orphan.repo_url"):
+        cli.cmd_update_repo(args)
+
+
+def test_expand_command_rejects_unknown_placeholder() -> None:
+    import pytest
+    import navette.cli as cli
+
+    with pytest.raises(SystemExit, match="unknown placeholder"):
+        cli.expand_command("{venv}/bin/x --out {missing}", {"venv": "/v"})
+
+
+def test_output_kind_from_job_type(tmp_path) -> None:
+    import navette.cli as cli
+
+    cfg = _cfg(tmp_path)
+    assert cli.output_kind(cfg, "render") == "renders"
+    assert cli.output_kind(cfg, "plot") == "figures"
+    assert cli.output_kind(cfg, "process") == "processed"
+    assert cli.output_kind(cfg, "sparse") == "processed"
+
+
+def test_load_config_reads_tools_and_job_script(tmp_path, monkeypatch) -> None:
+    import navette.cli as cli
+
+    _write_cfg(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    cfg = cli.load_config()
+    assert cfg.job_script == "job.batch"
+    assert cfg.restart_helper == "check_restart.py"
+    assert "sigtool" in cfg.tools
+    assert cfg.job_types["render"]["tool"] == "snaptool"

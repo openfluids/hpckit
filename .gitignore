@@ -2,11 +2,11 @@ __pycache__/
 *.py[cod]
 .venv/
 .env
-.jz-manager/runs/
-.jz-manager/*.receipt.json
-jz_manager/receipts/
-data/jz_processed/
-plots/jz_renders/
+.navette/runs/
+.navette/*.receipt.json
+navette/receipts/
+data/navette_processed/
+plots/navette_renders/
 
 dist/
 *.egg-info/
