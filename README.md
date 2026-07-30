@@ -5,13 +5,20 @@ local project checkout. It manages remote tool checkouts, immutable per-SHA
 virtualenvs, run packets, Slurm submission and polling, receipts, artifact sync,
 and local run ledgers.
 
-The tools it runs are declared in your own `.hpckit.yaml` — `hpckit` ships none
-of them. It needs only a YAML parser itself; if you also want to render fields
-locally, install the optional renderer extra:
+The tools it runs are declared in your own `.hpckit.yaml` — `hpckit` ships none of
+them, and depends on nothing but a YAML parser itself.
+
+Its companion renderer is [`quadros`](https://github.com/openfluids/quadros),
+which turns simulation field snapshots into frames and video. Install it alongside
+if you want to render locally as well as on the cluster:
 
 ```bash
-pip install 'hpckit[renderer]'   # pulls in quadros (brings VTK, ~700 MB)
+pip install hpckit quadros
 ```
+
+It stays a separate install on purpose: `quadros` brings VTK, roughly 700 MB, and a
+machine that only submits jobs should not pay that. Once both are published a
+`hpckit[renderer]` extra will make this one command.
 
 Configuration lives in the project you run it from, not in this repository, so one
 installation drives any number of projects.

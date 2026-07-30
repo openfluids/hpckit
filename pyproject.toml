@@ -34,22 +34,6 @@ dependencies = [
   "PyYAML>=6.0",
 ]
 
-[project.optional-dependencies]
-# hpckit itself only dispatches; it needs nothing but a YAML parser. The
-# renderer extra pulls in quadros for anyone who wants to render locally as
-# well as on the cluster. It is deliberately optional: quadros brings VTK,
-# which is ~700 MB, and a machine that only submits jobs should not pay that.
-renderer = [
-  "quadros",
-]
-
-[tool.uv.sources]
-# Development-only: resolve the renderer extra from the sibling checkout, since
-# quadros is not published yet. uv strips this from published metadata, so the
-# wheel still declares a plain `quadros` requirement. Remove once quadros is on
-# a package index.
-quadros = { path = "../quadros", editable = true }
-
 [project.urls]
 Homepage = "https://github.com/openfluids/hpckit"
 Repository = "https://github.com/openfluids/hpckit"
