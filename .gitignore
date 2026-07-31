@@ -10,3 +10,7 @@ plots/hpckit_renders/
 
 dist/
 *.egg-info/
+
+# coverage
+.coverage
+htmlcov/
