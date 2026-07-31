@@ -42,6 +42,14 @@ Issues = "https://github.com/openfluids/hpckit/issues"
 [project.scripts]
 hpckit = "hpckit.cli:main"
 
+# Kept separate from the runtime dependencies on purpose: quadros pulls in VTK,
+# roughly 700 MB, and a machine that only submits jobs should not pay that.
+# This extra was removed before the first release because quadros was not yet
+# published -- uv resolves every declared extra when locking, so depending on an
+# unpublished package broke `uv lock` for everyone. quadros 0.1.0 is on PyPI now.
+[project.optional-dependencies]
+renderer = ["quadros>=0.1"]
+
 [dependency-groups]
 dev = [
   "build>=1.2",

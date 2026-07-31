@@ -13,16 +13,16 @@ The tools it runs are declared in your own `.hpckit.yaml` — `hpckit` ships non
 them, and depends on nothing but a YAML parser itself.
 
 Its companion renderer is [`quadros`](https://github.com/openfluids/quadros),
-which turns simulation field snapshots into frames and video. Install it alongside
-if you want to render locally as well as on the cluster:
+which turns simulation field snapshots into frames and video. Add it with the
+`renderer` extra if you want to render as well as submit:
 
 ```bash
-pip install hpckit quadros
+pip install hpckit              # submit jobs only
+pip install 'hpckit[renderer]'  # ...and render locally
 ```
 
-It stays a separate install on purpose: `quadros` brings VTK, roughly 700 MB, and a
-machine that only submits jobs should not pay that. Once both are published a
-`hpckit[renderer]` extra will make this one command.
+It stays optional on purpose: `quadros` brings VTK, roughly 700 MB, and a machine
+that only submits jobs should not pay that.
 
 Configuration lives in the project you run it from, not in this repository, so one
 installation drives any number of projects.
