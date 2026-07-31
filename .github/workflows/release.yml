@@ -1,0 +1,91 @@
+name: Release
+
+# Publishes to PyPI via trusted publishing (OIDC) — no API token is stored.
+# PyPI matches on owner / repo / workflow filename / environment, configured as:
+#   owner: openfluids | repo: hpckit | workflow: release.yml | environment: (blank)
+# Renaming this file breaks that match. The environment is left unset on PyPI, so
+# `environment: pypi` below is not part of the match — it exists so an approval
+# gate can be attached without touching either side.
+#
+# Tag-triggered so a release cannot happen without a tag recording which commit
+# shipped.
+on:
+  push:
+    tags: ["v*"]
+
+# Least privilege by default. Only the jobs that need more ask for it.
+permissions:
+  contents: read
+
+# Actions are pinned to commit SHAs, not tags. A tag is mutable and can be
+# repointed at new code under an unchanged name; a SHA cannot. Dependabot keeps
+# the pins current, and the trailing comment keeps them readable.
+
+jobs:
+  verify:
+    name: Verify tag and PyPI state
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Guards against tagging v0.2.0 while pyproject.toml still says 0.1.0 —
+      # PyPI would accept the mismatch and the tag would lie about what shipped.
+      - name: Tag must match the packaged version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "Tag v$tag does not match pyproject.toml version $pkg" >&2
+            exit 1
+          fi
+          echo "tag and packaged version agree: $pkg"
+
+      # PyPI refuses re-uploads of an existing version. Failing here says so in
+      # one line; failing in the publish step is an opaque 400 after a build.
+      - name: Refuse to republish an existing version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          code="$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/hpckit/$tag/json")"
+          if [ "$code" = "200" ]; then
+            echo "hpckit $tag is already on PyPI; PyPI will not accept a re-upload." >&2
+            echo "Bump the version rather than re-releasing this one." >&2
+            exit 1
+          fi
+          echo "version $tag is free on PyPI (HTTP $code)"
+
+  publish:
+    name: Build and publish to PyPI
+    needs: [verify]
+    runs-on: ubuntu-24.04
+    environment: pypi
+    permissions:
+      # Required to mint the OIDC token PyPI verifies. Scoped to this job: the
+      # verify job has no reason to be able to mint a publishing token.
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+
+      - name: Build
+        run: uv build
+
+      - name: Check metadata
+        run: uvx twine check dist/*
+
+      - uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
+
+  github-release:
+    name: Create the GitHub release
+    needs: [publish]
+    runs-on: ubuntu-24.04
+    # Creating a release writes to the repo, so this job -- and only this job --
+    # needs write access.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
