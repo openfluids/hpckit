@@ -646,3 +646,159 @@ def test_load_config_reads_tools_and_job_script(tmp_path, monkeypatch) -> None:
     assert cfg.restart_helper == "check_restart.py"
     assert "sigtool" in cfg.tools
     assert cfg.job_types["render"]["tool"] == "snaptool"
+
+
+# --- cmd_submit: the primary command, previously exercised only via sparse ----
+
+
+def _submit_harness(tmp_path, monkeypatch, sbatch_stdout="Submitted batch job 98765\n"):
+    """Stub every outbound call so cmd_submit can run end to end offline.
+
+    Returns (cli, calls, ssh_scripts) so a test can assert on what would have
+    been executed rather than on internals.
+    """
+    import subprocess
+
+    import hpckit.cli as cli
+
+    _write_cfg(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    calls: list[list[str]] = []
+    ssh_scripts: list[str] = []
+
+    def fake_run(cmd, *, check=True, cwd=None):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    def fake_ssh(cfg, script, *, check=True):
+        ssh_scripts.append(script)
+        return subprocess.CompletedProcess(["ssh"], 0, sbatch_stdout, "")
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "ssh", fake_ssh)
+    return cli, calls, ssh_scripts
+
+
+def test_submit_rejects_an_unknown_job_type(tmp_path, monkeypatch) -> None:
+    import argparse
+
+    import pytest
+
+    cli, _, _ = _submit_harness(tmp_path, monkeypatch)
+    args = argparse.Namespace(workflow="nosuchthing", case="c/1", ref="abc1234", manual=True)
+    with pytest.raises(SystemExit) as excinfo:
+        cli.cmd_submit(args)
+    msg = str(excinfo.value)
+    assert "unknown job type nosuchthing" in msg
+    # the message must name what IS available, or the user has to read the source
+    assert "process" in msg
+
+
+def test_submit_manual_prepares_without_calling_sbatch(tmp_path, monkeypatch, capsys) -> None:
+    """--manual is the escape hatch: stage everything, submit nothing."""
+    import argparse
+    import json
+
+    cli, _, ssh_scripts = _submit_harness(tmp_path, monkeypatch)
+    args = argparse.Namespace(workflow="process", case="mycase/340", ref="abc1234", manual=True)
+    rc = cli.cmd_submit(args)
+    assert rc == 0
+
+    rid = capsys.readouterr().out.strip()
+    assert rid.endswith("-process-mycase_340-abc1234")
+    assert not any("sbatch" in s for s in ssh_scripts), ssh_scripts
+
+    receipt = json.loads((tmp_path / "hpckit" / "receipts" / f"{rid}.json").read_text())
+    assert receipt["status"] == "prepared"
+    assert receipt["job_id"] is None
+    assert receipt["submitted_at"] is None
+
+
+def test_submit_records_the_slurm_job_id_from_sbatch_output(tmp_path, monkeypatch, capsys) -> None:
+    import argparse
+    import json
+
+    cli, _, ssh_scripts = _submit_harness(tmp_path, monkeypatch)
+    args = argparse.Namespace(workflow="process", case="mycase/340", ref="abc1234", manual=False)
+    assert cli.cmd_submit(args) == 0
+
+    rid = capsys.readouterr().out.strip()
+    assert any("sbatch job.sbatch" in s for s in ssh_scripts), ssh_scripts
+
+    receipt = json.loads((tmp_path / "hpckit" / "receipts" / f"{rid}.json").read_text())
+    assert receipt["job_id"] == "98765"
+    assert receipt["status"] == "submitted"
+    assert receipt["submitted_at"] is not None
+
+
+def test_submit_falls_back_to_raw_output_when_sbatch_is_unparseable(tmp_path, monkeypatch, capsys) -> None:
+    """A changed sbatch banner must not silently produce job_id=None."""
+    import argparse
+    import json
+
+    cli, _, _ = _submit_harness(tmp_path, monkeypatch, sbatch_stdout="queued as 4242\n")
+    args = argparse.Namespace(workflow="process", case="c1", ref="abc1234", manual=False)
+    assert cli.cmd_submit(args) == 0
+    rid = capsys.readouterr().out.strip()
+
+    receipt = json.loads((tmp_path / "hpckit" / "receipts" / f"{rid}.json").read_text())
+    assert receipt["job_id"] == "queued as 4242"
+    assert receipt["status"] == "submitted"
+
+
+def test_submit_mirrors_kind_onto_case_for_plot_workflows(tmp_path, monkeypatch, capsys) -> None:
+    """plot takes --kind, not a case, but the run_id layout must stay uniform."""
+    import argparse
+    import json
+
+    cli, _, _ = _submit_harness(tmp_path, monkeypatch)
+    args = argparse.Namespace(workflow="plot", case=None, kind="spectra", ref="abc1234", manual=True)
+    assert cli.cmd_submit(args) == 0
+    rid = capsys.readouterr().out.strip()
+    assert rid.endswith("-plot-spectra-abc1234")
+
+    receipt = json.loads((tmp_path / "hpckit" / "receipts" / f"{rid}.json").read_text())
+    assert receipt["case"] == "spectra"
+    # plot declares output_kind: figures, so the output path must follow it
+    assert "/outputs/figures/" in receipt["remote_output_path"]
+
+
+def test_read_receipt_falls_back_to_the_cluster_when_absent_locally(tmp_path, monkeypatch) -> None:
+    """Receipts live on the cluster too; a fresh checkout must still resolve one."""
+    import json
+    import subprocess
+
+    import hpckit.cli as cli
+
+    _write_cfg(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    cfg = cli.load_config()
+
+    remote_receipt = {"run_id": "rid7", "status": "submitted"}
+    seen: list[str] = []
+
+    def fake_ssh(_cfg, script, *, check=True):
+        seen.append(script)
+        return subprocess.CompletedProcess(["ssh"], 0, json.dumps(remote_receipt), "")
+
+    monkeypatch.setattr(cli, "ssh", fake_ssh)
+    assert cli.read_receipt(cfg, "rid7") == remote_receipt
+    assert seen and "receipts/rid7.json" in seen[0]
+
+
+def test_read_receipt_raises_when_neither_side_has_it(tmp_path, monkeypatch) -> None:
+    import subprocess
+
+    import pytest
+
+    import hpckit.cli as cli
+
+    _write_cfg(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    cfg = cli.load_config()
+    monkeypatch.setattr(
+        cli, "ssh", lambda *a, **k: subprocess.CompletedProcess(["ssh"], 1, "", "no such file")
+    )
+    with pytest.raises(SystemExit, match="receipt not found: nope"):
+        cli.read_receipt(cfg, "nope")
