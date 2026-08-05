@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hpckit"
-version = "0.2.0"
+version = "0.2.1"
 description = "HPC orchestration CLI for SSH, Slurm run packets, receipts, and artifact sync."
 readme = "README.md"
 requires-python = ">=3.11"
