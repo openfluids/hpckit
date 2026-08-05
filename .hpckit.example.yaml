@@ -10,6 +10,26 @@ beads: .beads
 job_script: job.batch
 # Restart helper edited by sparse continuation (default shown).
 restart_helper: check_restart.py
+# Shell run inside the generated job.sbatch, after `set -euo pipefail` and
+# before the job type's command. This is where site environment setup goes.
+# sbatch starts a NON-LOGIN shell, so anything a login profile would have
+# provided has to be set up here, or the job runs against a different
+# environment than an interactive shell does. That failure is quiet: the
+# command still runs, it just cannot find the tools it expected.
+#
+# It belongs here rather than inside each job type's `command` because command
+# templates are expanded with str.format_map, where a shell `${VAR}` raises
+# "unknown placeholder"; because every job type would otherwise repeat it; and
+# because it varies with the machine, not with the job. Omit it and the
+# generated script is exactly what it was before.
+prologue: |
+  module load myenv
+  export OMP_NUM_THREADS=1
+# Some environment scripts reference unbound variables and trip `set -u`.
+# Fence those rather than dropping the option for the whole job:
+#   set +u
+#   . /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1
+#   set -u
 # Slurm directives for the generated job.sbatch. `account` is required and has
 # no default: it names an allocation on a specific machine, and there is no
 # value that would be right anywhere else. The rest fall back to the values

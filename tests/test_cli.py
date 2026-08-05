@@ -802,3 +802,91 @@ def test_read_receipt_raises_when_neither_side_has_it(tmp_path, monkeypatch) -> 
     )
     with pytest.raises(SystemExit, match="receipt not found: nope"):
         cli.read_receipt(cfg, "nope")
+
+
+def test_prologue_runs_before_the_command_and_after_set_e(tmp_path, monkeypatch) -> None:
+    """Site environment setup belongs in the job script, not in every command.
+
+    sbatch starts a non-login shell, so anything a login profile would have
+    provided -- `module load`, an MPI or compiler environment -- has to be set up
+    inside the job. Without it the command still runs, it just cannot find the
+    tools it expected, which is a quiet failure rather than a loud one.
+    """
+    import hpckit.cli as cli
+
+    prologue = "module load oneapi\nexport OMP_NUM_THREADS=1"
+    _write_cfg(tmp_path, prologue=prologue)
+    monkeypatch.chdir(tmp_path)
+    cfg = cli.load_config()
+    packet = cli.build_packet(cfg, "rid1", "process", "mycase/1", {"sigtool": "abc1234"}, {})
+
+    sbatch = (packet / "job.sbatch").read_text()
+    assert "module load oneapi" in sbatch
+    assert "export OMP_NUM_THREADS=1" in sbatch
+
+    # Order matters in both directions: after `set -euo pipefail` so a failing
+    # module load aborts the job, and before the command so the command sees it.
+    set_e = sbatch.index("set -euo pipefail")
+    mod = sbatch.index("module load oneapi")
+    cmd = sbatch.index("sigtool.cli process")
+    assert set_e < mod < cmd
+
+    # ...and it must not be spliced into a #SBATCH directive block.
+    assert "#SBATCH module" not in sbatch
+
+
+def test_prologue_is_absent_by_default(tmp_path, monkeypatch) -> None:
+    """A config without a prologue must generate exactly what it did before."""
+    import hpckit.cli as cli
+
+    _write_cfg(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    cfg = cli.load_config()
+    packet = cli.build_packet(cfg, "rid2", "process", "mycase/1", {"sigtool": "abc1234"}, {})
+
+    sbatch = (packet / "job.sbatch").read_text()
+    assert cfg.prologue == ""
+    # No stray blank line between the shell options and the first real command.
+    assert "set -euo pipefail\nmkdir -p" in sbatch
+
+
+def test_prologue_does_not_swallow_the_command_line(tmp_path, monkeypatch) -> None:
+    """A prologue written without a trailing newline must not eat the command.
+
+    YAML block scalars usually end in a newline, but `prologue: "module load x"`
+    as a plain string does not, and concatenating that straight onto the body
+    would produce `module load xmkdir -p ...`.
+    """
+    import hpckit.cli as cli
+
+    _write_cfg(tmp_path, prologue="module load oneapi")
+    monkeypatch.chdir(tmp_path)
+    cfg = cli.load_config()
+    packet = cli.build_packet(cfg, "rid3", "process", "mycase/1", {"sigtool": "abc1234"}, {})
+
+    sbatch = (packet / "job.sbatch").read_text()
+    assert "module load oneapi\nmkdir -p" in sbatch
+    assert "oneapimkdir" not in sbatch
+
+
+def test_prologue_may_use_shell_brace_syntax(tmp_path, monkeypatch) -> None:
+    """The prologue is not a command template, so `${VAR}` must survive.
+
+    This is the concrete reason environment setup cannot be folded into a job
+    type's `command`: those go through str.format_map, where a shell `${VAR}`
+    raises "unknown placeholder '{VAR}'".
+    """
+    import pytest
+
+    import hpckit.cli as cli
+
+    _write_cfg(tmp_path, prologue='export NP="${SLURM_CPUS_PER_TASK}"')
+    monkeypatch.chdir(tmp_path)
+    cfg = cli.load_config()
+    packet = cli.build_packet(cfg, "rid4", "process", "mycase/1", {"sigtool": "abc1234"}, {})
+
+    assert '${SLURM_CPUS_PER_TASK}' in (packet / "job.sbatch").read_text()
+
+    # The same text in a command template is a hard error -- which is the point.
+    with pytest.raises(SystemExit, match="unknown placeholder"):
+        cli.expand_command('export NP="${SLURM_CPUS_PER_TASK}"', {"venv": "/v"})

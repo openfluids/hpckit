@@ -64,6 +64,9 @@ remote_state_root: /path/to/work/.hpckit
 ledger: HPCKIT_RUN_LOG.md
 job_script: job.batch
 restart_helper: check_restart.py
+prologue: |                      # optional — site environment setup
+  module load myenv
+  export OMP_NUM_THREADS=1
 slurm:
   account: myproj@cpu   # required — no default
   partition: prepost
@@ -98,6 +101,31 @@ python -m hpckit doctor
 ```
 
 Job type subcommands (e.g. `process`, `render`, `plot`) come from `job_types:` in the config. Sparse is built-in and uses `job_script` / `restart_helper`.
+
+### Site environment setup
+
+`sbatch` starts a **non-login shell**, so anything your login profile would normally
+provide — `module load`, an MPI or compiler environment — is absent inside the job unless
+you set it up there. That failure is a quiet one: the command still runs, it just cannot
+find the tools it expected, and you get a result that looks like a real one.
+
+`prologue:` is shell run inside the generated `job.sbatch`, after `set -euo pipefail` and
+before the job type's command. It goes there rather than inside each `command:` because
+command templates are expanded with `str.format_map`, so a shell `${VAR}` would raise
+`unknown placeholder '{VAR}'`; because every job type would otherwise repeat it; and
+because it varies with the machine, not with the job. Omit it and the generated script is
+what it was before.
+
+Some environment scripts reference unbound variables and trip `set -u`. Fence those rather
+than dropping the option for the whole job:
+
+```yaml
+prologue: |
+  set +u
+  . /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1
+  set -u
+  export OMP_NUM_THREADS=1
+```
 
 ## Development
 

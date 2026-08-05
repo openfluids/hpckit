@@ -35,6 +35,14 @@ class Config:
     artifact_sync: dict[str, str]
     job_script: str | None = None
     restart_helper: str = DEFAULT_RESTART_HELPER
+    #: Shell run inside the generated job.sbatch before the job type's command.
+    #: This is where site environment setup belongs -- `module load`, sourcing a
+    #: compiler or MPI environment, exporting thread counts. It cannot live in a
+    #: job type's `command`, for three reasons: command templates go through
+    #: str.format_map, so any shell `${VAR}` raises "unknown placeholder"; every
+    #: job type would have to repeat it; and it varies with the machine, not with
+    #: the job. Empty by default, so existing configs generate the same script.
+    prologue: str = ""
     tools: dict[str, dict[str, Any]] = field(default_factory=dict)
     job_types: dict[str, dict[str, Any]] = field(default_factory=dict)
     slurm: dict[str, Any] = field(default_factory=dict)
@@ -83,6 +91,7 @@ def try_load_config(start: Path | None = None) -> Config | None:
                 artifact_sync=data.get("artifact_sync", {}),
                 job_script=data.get("job_script"),
                 restart_helper=data.get("restart_helper", DEFAULT_RESTART_HELPER),
+                prologue=str(data.get("prologue") or ""),
                 tools={str(k): (v if isinstance(v, dict) else {}) for k, v in tools.items()},
                 job_types={str(k): (v if isinstance(v, dict) else {}) for k, v in job_types.items()},
                 slurm=data.get("slurm") if isinstance(data.get("slurm"), dict) else {},
@@ -401,6 +410,16 @@ def build_packet(cfg: Config, rid: str, workflow: str, case: str, repos: dict[st
     ntasks = cfg.slurm.get("ntasks", 1)
     cpus_per_task = cfg.slurm.get("cpus_per_task", 4)
 
+    # Site environment setup, run before the command. sbatch starts a
+    # non-login shell, so anything a login profile would have provided --
+    # `module load`, an MPI or compiler environment -- has to be set up here or
+    # the job runs against a different environment than an interactive shell
+    # would. That failure is quiet: the command still runs, it just cannot find
+    # the tools it expected. Normalised to end in exactly one newline so the
+    # command does not get appended to the prologue's last line.
+    prologue = cfg.prologue.strip("\n")
+    prologue = f"{prologue}\n" if prologue else ""
+
     job = (
         "#!/bin/bash\n"
         f"#SBATCH --job-name={rid[:40]}\n"
@@ -412,6 +431,7 @@ def build_packet(cfg: Config, rid: str, workflow: str, case: str, repos: dict[st
         f"#SBATCH --ntasks={ntasks}\n"
         f"#SBATCH --cpus-per-task={cpus_per_task}\n"
         "set -euo pipefail\n"
+        f"{prologue}"
         f"{body}"
     )
     (root / "job.sbatch").write_text(job)
