@@ -138,3 +138,14 @@ uv run python -m build
 The repository uses the PyPA-recommended `src/` layout, standard `pyproject.toml` metadata, a public `[project.scripts]` entry point, and dependency groups for maintainer tooling.
 
 Destructive remote cleanup is intentionally not implemented. Sparse continuation edits only the case-local restart helper knobs and records the backup name in the receipt.
+
+## Disclaimer
+
+This software is provided "as is", without warranty of any kind. To the extent
+permitted by law, the authors and contributors are not liable for any damage, loss
+or claim arising from its use or misuse. You are responsible for how you use it and
+for following the laws and rules that apply to you. The full terms are in
+[LICENSE](LICENSE).
+
+Use hpckit only on systems you are authorised to use, and follow their usage rules.
+You are responsible for the jobs and file transfers it starts.
