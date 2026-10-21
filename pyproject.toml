@@ -67,3 +67,6 @@ src = ["src", "tests"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+
+[tool.uv]
+exclude-newer = "7 days"
