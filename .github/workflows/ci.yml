@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Read-only token: nothing here pushes, comments or publishes.
+permissions:
+  contents: read
+
+# Actions are pinned to commit SHAs, not tags. A tag is mutable and can be
+# repointed at new code under an unchanged name; a SHA cannot. Dependabot keeps
+# the pins current, and the trailing comment keeps them readable.
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Sync environment
+        run: uv sync
+
+      - name: Lint
+        run: uv run ruff check .
+
+      # uv.lock must stay consistent with pyproject.toml, or `uv sync` in the
+      # other jobs silently installs something the manifest no longer asks for.
+      - name: Lock file is in sync
+        run: uv lock --check
+
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        include:
+          # hpckit runs on the machine you drive the cluster *from*, not on the
+          # cluster. That is a laptop as often as a login node, so the other
+          # host platform gets a leg rather than being assumed to work.
+          - os: macos-26
+            python-version: "3.14"
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Sync environment
+        run: uv sync --python ${{ matrix.python-version }}
+
+      - name: Run tests
+        run: |
+          uv run pytest -v | tee pytest-output.txt
+          {
+            echo "### Tests (${{ matrix.os }}, Python ${{ matrix.python-version }})"
+            echo '```'
+            tail -n 15 pytest-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+        shell: bash
+
+      # The CLI must start without a config present. `hpckit --help` builds the
+      # parser, which reads .hpckit.yaml to discover job_types; a regression
+      # there turns "no config yet" into a crash on the very first command a
+      # new user runs.
+      - name: CLI starts with no configuration present
+        run: uv run hpckit --help
+        shell: bash
+
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Build
+        run: uv build
+
+      - name: Check package
+        run: uvx twine check dist/*
+
+      # A wheel must never carry a filesystem path as a dependency: it would be
+      # uninstallable for everyone but the machine that built it. This guards the
+      # renderer extra, which will be reintroduced once quadros is published and
+      # is the obvious way for such a path to slip in.
+      - name: Published metadata must not contain a local path
+        run: |
+          python - <<'PY'
+          import glob, sys, zipfile
+          wheel = sorted(glob.glob("dist/hpckit-*.whl"))[-1]
+          zf = zipfile.ZipFile(wheel)
+          name = next(n for n in zf.namelist() if n.endswith("METADATA"))
+          md = zf.read(name).decode()
+          bad = [m for m in ("file://", "../quadros", "@ file") if m in md]
+          if bad:
+              sys.exit(f"FAIL: {wheel} METADATA leaks a local source override: {bad}")
+          print("ok: no local path in published metadata")
+          PY
+        shell: bash
