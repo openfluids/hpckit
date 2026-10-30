@@ -25,16 +25,16 @@ wheels = [
 
 [[package]]
 name = "build"
-version = "1.5.0"
+version = "1.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorama", marker = "os_name == 'nt'" },
     { name = "packaging" },
     { name = "pyproject-hooks" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/78/e0/df5e171f685f82f37b12e1f208064e24244911079d7b767447d1af7e0d70/build-1.5.0.tar.gz", hash = "sha256:302c22c3ba2a0fd5f3911918651341ebb3896176cbdec15bd421f80b1afc7647", size = 89796, upload-time = "2026-04-30T03:18:25.17Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bd/67/4898a44ea4f3f8e213b0954ec0aa0a16971d62a6212d6ea3931e97115b99/build-1.6.1.tar.gz", hash = "sha256:51cc11666391ab6f092070437ac747002ff46f3e4113a3622177ee6b488bfc53", size = 113427, upload-time = "2026-09-10T07:56:00.417Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0d/fe/6bea5c9162869c5beba5d9c8abbed835ec85bf1ec1fba05a3822325c45f3/build-1.5.0-py3-none-any.whl", hash = "sha256:13f3eecb844759ab66efec90ca17639bbf14dc06cb2fdf37a9010322d9c50a6f", size = 26018, upload-time = "2026-04-30T03:18:23.644Z" },
+    { url = "https://files.pythonhosted.org/packages/ad/9b/9fb3585dabcd73a1b2a6267f63f62649347c9e6d072c9fde365b105abb2c/build-1.6.1-py3-none-any.whl", hash = "sha256:ecd351a4be9d35a9eaaba244a7687143c9c7d4aea6ac964e7e7ddab20cbcf4e7", size = 31179, upload-time = "2026-09-10T07:55:59.148Z" },
 ]
 
 [[package]]
@@ -937,7 +937,7 @@ wheels = [
 
 [[package]]
 name = "quadros"
-version = "0.1.0"
+version = "0.1.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
@@ -946,9 +946,9 @@ dependencies = [
     { name = "pyvista" },
     { name = "vtk" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9f/e2/ac067fe29bf5568c6b88abfb1658e22c51fe12441169bbc84a2090a6f4eb/quadros-0.1.0.tar.gz", hash = "sha256:53bb3874c4f4710a5d2bc87321c2b6e8102d7829ad26b8e6d8a35a27bc401b7b", size = 742624, upload-time = "2026-07-31T22:03:03.498Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/88/e1/fc71fb71a17cd863ec74b1b8e465ba2e6dbfcac60c3df7b24be657618d3f/quadros-0.1.2.tar.gz", hash = "sha256:d4137d713d92c7013b44384010c27476d702f694db858347e98d07271192aa11", size = 43147, upload-time = "2026-08-02T20:34:10.548Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c7/00/5be905d958fa0f40a56ea3152348450fc680ee340c2a823fa9cbe6f52140/quadros-0.1.0-py3-none-any.whl", hash = "sha256:285de005db7021dc1c50bdaa510d089c4185de2b1f5864af4f725dbc7788c574", size = 39833, upload-time = "2026-07-31T22:03:02.379Z" },
+    { url = "https://files.pythonhosted.org/packages/81/12/a1edf1334bb5c4b53215c0de320d43a248f2a53da15a8c1cdb1020809764/quadros-0.1.2-py3-none-any.whl", hash = "sha256:2f84f9895b614f025aad36cb834ca09d5c96ef5165cb6686e8123d9611ab5c4d", size = 39861, upload-time = "2026-08-02T20:34:09.476Z" },
 ]
 
 [[package]]
